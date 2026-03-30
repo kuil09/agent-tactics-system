@@ -1,7 +1,9 @@
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
-const distDir = ".tmp-runtime-dist";
+const distDir = await mkdtemp(join(tmpdir(), "agent-tactics-runtime-"));
 
 try {
   run("tsc", [
@@ -20,7 +22,7 @@ try {
     "src/runtime/cli.ts",
   ]);
 
-  run("node", [`${distDir}/runtime/cli.js`, ...process.argv.slice(2)]);
+  run("node", [join(distDir, "runtime/cli.js"), ...process.argv.slice(2)]);
 } finally {
   await rm(distDir, { recursive: true, force: true });
 }

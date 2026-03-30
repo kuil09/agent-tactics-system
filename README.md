@@ -66,19 +66,21 @@ npm run runtime:fixture
 npm run runtime:fixture -- --scenario=failure
 ```
 
-What the CLI fixes as the M1 seam:
+What the CLI now fixes as the M2 verification seam:
 
 - One command replays `adapters + runtime + skills + verifier handoff`
 - Success artifacts land in `artifacts/runtime-fixtures/success/`
 - Failure and rollback artifacts land in `artifacts/runtime-fixtures/failure/`
 - Each run emits `run-result.json` plus a fixture workspace under `workspace/`
 - Runtime execution writes `workspace/artifacts/runtime.log` on the success path
-- Failure runs restore the workspace snapshot and record recovery state in
-  `run-result.json`
+- `run-result.json` records the `verification_handoff.contract_version`, required
+  validation commands, artifact references, and promotion-gate status
+- Failure runs restore the workspace snapshot and record rollback, restore, and
+  requeue steps as assertion-friendly recovery contract data in `run-result.json`
 
-The fixture is intentionally narrow. It proves the shared execution seam and
-artifact contract for M2, without claiming production provider integration,
-approval workflow wiring, or richer verification evidence.
+The fixture is intentionally narrow. It proves the shared execution seam and M2
+artifact contract for richer verification evidence and rollback handling,
+without claiming production provider integration or approval workflow wiring.
 
 ## Verification
 
@@ -96,6 +98,8 @@ Current expected result:
   `artifacts/runtime-fixtures/success/`
 - `npm run runtime:fixture -- --scenario=failure` exits successfully and writes
   rollback evidence to `artifacts/runtime-fixtures/failure/`
+- `run-result.json` exposes promotion-gate evidence for the verifier and a
+  rollback/requeue contract that tests can assert directly
 - `npm run typecheck` exits successfully
 - `npm test` passes the full Vitest suite
 - `npm run test:coverage` passes and enforces 100% lines/statements/functions/branches coverage
@@ -120,9 +124,9 @@ Runtime entrypoints:
 
 ## Next Milestone
 
-1. Enrich verification evidence beyond the current summary and replay timeline so
-   done-candidate promotion can depend on stronger M2 proof.
-2. Harden rollback and requeue coverage around richer repo mutations and
-   provider-side failure modes.
-3. Replace the fixture provider with a real adapter handshake while preserving
-   the shared artifact contract fixed in M1.
+1. Replace the fixture provider with a real adapter handshake while preserving
+   the shared M2 artifact contract.
+2. Extend recovery coverage to multi-file repo mutations and provider-side
+   partial writes.
+3. Wire the same verification-evidence contract into approval workflow
+   promotion.

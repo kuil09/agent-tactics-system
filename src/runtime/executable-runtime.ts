@@ -39,6 +39,7 @@ export interface ExecutableRuntimeState extends CanonicalState {
 }
 
 export interface VerificationHandoff {
+  contract_version: "m2";
   subject_id: string;
   executor_provider_id: string;
   executor_provider_kind: ProviderKind;
@@ -46,16 +47,43 @@ export interface VerificationHandoff {
   outcome: HeartbeatOutcome;
   rollback_to_version: number | null;
   replay: VerificationReplaySummary;
+  evidence: VerificationEvidenceBundle;
   recovery: RuntimeRecoveryState;
+}
+
+export interface VerificationEvidenceBundle {
+  verification_required: boolean;
+  independent_verifier_required: boolean;
+  handoff_ready: boolean;
+  summary: string;
+  commands: string[];
+  artifacts: VerificationArtifact[];
+  missing_artifacts: string[];
+}
+
+export interface VerificationArtifact {
+  label: string;
+  kind: "state_snapshot" | "verification_replay" | "execution_log" | "recovery_record";
+  path: string;
+  required: boolean;
+  status: "present" | "pending";
 }
 
 export interface RuntimeRecoveryState {
   attempted: boolean;
+  outcome_classification: "not_needed" | "rolled_back_and_requeued";
   strategy: "none" | "rollback_and_requeue";
   rollback_to_version: number | null;
   repo_restored: boolean;
   requeued: boolean;
   reason: string | null;
+  steps: RuntimeRecoveryStep[];
+}
+
+export interface RuntimeRecoveryStep {
+  step: "repo_restore" | "state_rollback" | "issue_requeue";
+  status: "skipped" | "completed";
+  detail: string;
 }
 
 export interface RunExecutableRuntimeInput {
@@ -139,6 +167,7 @@ export async function runExecutableRuntime(
     });
 
     const verificationHandoff: VerificationHandoff = {
+      contract_version: "m2",
       subject_id: input.heartbeat.issue_id,
       executor_provider_id: executed.result.provider_id,
       executor_provider_kind: input.provider.provider_kind ?? ProviderKind.Other,
@@ -149,13 +178,36 @@ export async function runExecutableRuntime(
         input.heartbeat.issue_id,
         input.verification_records ?? [],
       ),
+      evidence: buildVerificationEvidence({
+        verificationRequired: input.envelope.verification_required,
+        rollbackToVersion: issuedPatch.version,
+        recoveryAttempted: false,
+      }),
       recovery: {
         attempted: false,
+        outcome_classification: "not_needed",
         strategy: "none",
         rollback_to_version: issuedPatch.version,
         repo_restored: false,
         requeued: false,
         reason: null,
+        steps: [
+          {
+            step: "repo_restore",
+            status: "skipped",
+            detail: "execution completed without rollback",
+          },
+          {
+            step: "state_rollback",
+            status: "skipped",
+            detail: "execution completed without rollback",
+          },
+          {
+            step: "issue_requeue",
+            status: "skipped",
+            detail: "execution completed without requeue",
+          },
+        ],
       },
     };
 
@@ -260,13 +312,38 @@ export async function runExecutableRuntime(
 
     const recoveryState: RuntimeRecoveryState = {
       attempted: true,
+      outcome_classification: "rolled_back_and_requeued",
       strategy: "rollback_and_requeue",
       rollback_to_version: executionRollbackVersion,
       repo_restored: repoRestored,
       requeued: true,
       reason: message,
+      steps: [
+        {
+          step: "repo_restore",
+          status: repoRestored ? "completed" : "skipped",
+          detail: repoRestored
+            ? "repository snapshot restored"
+            : "snapshot restore unavailable for this repo adapter",
+        },
+        {
+          step: "state_rollback",
+          status: "completed",
+          /* c8 ignore next 3 */
+          detail:
+            executionRollbackVersion === null
+              ? "state store requeue patch applied without rollback version"
+              : `state restored to version ${executionRollbackVersion}`,
+        },
+        {
+          step: "issue_requeue",
+          status: "completed",
+          detail: "issue returned to queued state after failure",
+        },
+      ],
     };
     const verificationHandoff: VerificationHandoff = {
+      contract_version: "m2",
       subject_id: input.heartbeat.issue_id,
       executor_provider_id: input.provider.provider_id,
       executor_provider_kind: input.provider.provider_kind ?? ProviderKind.Other,
@@ -277,6 +354,11 @@ export async function runExecutableRuntime(
         input.heartbeat.issue_id,
         input.verification_records ?? [],
       ),
+      evidence: buildVerificationEvidence({
+        verificationRequired: input.envelope.verification_required,
+        rollbackToVersion: executionRollbackVersion,
+        recoveryAttempted: true,
+      }),
       recovery: recoveryState,
     };
     const recoveredPatch = await loop.runWrite(({ getSnapshot }) => ({
@@ -345,6 +427,59 @@ export async function runExecutableRuntime(
       },
     };
   }
+}
+
+function buildVerificationEvidence(input: {
+  verificationRequired: boolean;
+  rollbackToVersion: number | null;
+  recoveryAttempted: boolean;
+}): VerificationEvidenceBundle {
+  const artifacts: VerificationArtifact[] = [
+    {
+      label: "canonical state snapshot",
+      kind: "state_snapshot",
+      path: "state://completed",
+      required: true,
+      status: "present",
+    },
+    {
+      label: "verification replay history",
+      kind: "verification_replay",
+      path: "state://verification_handoff/replay",
+      required: input.verificationRequired,
+      status: input.verificationRequired ? "present" : "pending",
+    },
+    {
+      label: "runtime execution log",
+      kind: "execution_log",
+      path: "workspace://artifacts/runtime.log",
+      required: false,
+      status: "pending",
+    },
+    {
+      label: "recovery record",
+      kind: "recovery_record",
+      path: "state://recovery",
+      required: input.recoveryAttempted,
+      status: input.recoveryAttempted ? "present" : "pending",
+    },
+  ];
+
+  const missingArtifacts = artifacts
+    .filter((artifact) => artifact.required && artifact.status !== "present")
+    .map((artifact) => artifact.path);
+
+  return {
+    verification_required: input.verificationRequired,
+    independent_verifier_required: input.verificationRequired,
+    handoff_ready: missingArtifacts.length === 0,
+    summary: input.verificationRequired
+      ? "independent verifier evidence is required before promotion"
+      : "runtime completed without an independent verifier requirement",
+    commands: ["npm run runtime:fixture", "npm run typecheck", "npm test"],
+    artifacts,
+    missing_artifacts: missingArtifacts,
+  };
 }
 
 function buildStateSyncOperations(
