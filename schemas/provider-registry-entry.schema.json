@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-tactics-system/schemas/provider-registry-entry.schema.json",
+  "title": "ProviderRegistryEntry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "provider_id",
+    "provider_kind",
+    "transport",
+    "models",
+    "trust_tier",
+    "eligibility",
+    "assignment_modes"
+  ],
+  "properties": {
+    "provider_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider_kind": {
+      "type": "string",
+      "enum": [
+        "openai",
+        "claude",
+        "opencode",
+        "cursor",
+        "local_openai_compatible",
+        "other"
+      ]
+    },
+    "transport": {
+      "type": "string",
+      "enum": [
+        "api",
+        "cli",
+        "embedded",
+        "other"
+      ]
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "model_id",
+          "task_levels_supported"
+        ],
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "task_levels_supported": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "enum": [
+                "L1",
+                "L2",
+                "L3",
+                "L4",
+                "L5"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "trust_tier": {
+      "type": "string",
+      "enum": [
+        "T0",
+        "T1",
+        "T2",
+        "T3",
+        "T4"
+      ]
+    },
+    "eligibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registered",
+        "protocol_compliant",
+        "heartbeat_ok",
+        "microbench_status",
+        "last_calibrated_at"
+      ],
+      "properties": {
+        "registered": {
+          "type": "boolean"
+        },
+        "protocol_compliant": {
+          "type": "boolean"
+        },
+        "heartbeat_ok": {
+          "type": "boolean"
+        },
+        "microbench_status": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "pass",
+            "fail"
+          ]
+        },
+        "last_calibrated_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "assignment_modes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "direct",
+          "decompose_only",
+          "reject"
+        ]
+      }
+    }
+  }
+}

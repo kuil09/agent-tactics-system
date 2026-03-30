@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-tactics-system/schemas/skill-contract.schema.json",
+  "title": "SkillContract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "skill_id",
+    "purpose",
+    "preconditions",
+    "allowed_roles",
+    "allowed_targets",
+    "side_effect_level",
+    "requires_lock",
+    "verification_required",
+    "failure_recovery"
+  ],
+  "properties": {
+    "skill_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1
+    },
+    "preconditions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "allowed_roles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "allowed_targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "side_effect_level": {
+      "type": "string",
+      "enum": [
+        "none",
+        "read_only",
+        "write_local",
+        "write_external",
+        "transactional"
+      ]
+    },
+    "requires_lock": {
+      "type": "boolean"
+    },
+    "verification_required": {
+      "type": "boolean"
+    },
+    "failure_recovery": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

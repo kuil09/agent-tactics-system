@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-tactics-system/schemas/heartbeat-record.schema.json",
+  "title": "HeartbeatRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_id",
+    "agent_id",
+    "issue_id",
+    "turn_number",
+    "inputs_summary",
+    "allowed_action_budget",
+    "started_at",
+    "finished_at",
+    "outcome"
+  ],
+  "properties": {
+    "record_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "issue_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "turn_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "inputs_summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "allowed_action_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_calls",
+        "write_ops"
+      ],
+      "properties": {
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "write_ops": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "noop",
+        "delegated",
+        "patched",
+        "blocked",
+        "verified"
+      ]
+    }
+  }
+}

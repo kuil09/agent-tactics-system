@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-tactics-system/schemas/assignment-decision.schema.json",
+  "title": "AssignmentDecision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "candidate_provider_id",
+    "candidate_model",
+    "target_role",
+    "requested_task_level",
+    "decision",
+    "reasons",
+    "required_skills",
+    "independent_verifier_required"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate_provider_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_role": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requested_task_level": {
+      "type": "string",
+      "enum": [
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5"
+      ]
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "assign",
+        "decompose",
+        "reject"
+      ]
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "required_skills": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "independent_verifier_required": {
+      "type": "boolean"
+    }
+  }
+}

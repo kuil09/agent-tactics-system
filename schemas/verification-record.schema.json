@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-tactics-system/schemas/verification-record.schema.json",
+  "title": "VerificationRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verification_id",
+    "subject_id",
+    "subject_kind",
+    "verifier_provider_id",
+    "verifier_model",
+    "status",
+    "evidence",
+    "created_at"
+  ],
+  "properties": {
+    "verification_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "subject_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "subject_kind": {
+      "type": "string",
+      "enum": [
+        "task",
+        "state_patch",
+        "artifact"
+      ]
+    },
+    "verifier_provider_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "verifier_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "pass",
+        "fail",
+        "requeue"
+      ]
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
