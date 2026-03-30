@@ -132,13 +132,21 @@ describe("programmatic executable runtime", () => {
         },
       },
     });
-    expect(result.verification_handoff).toEqual({
+    expect(result.verification_handoff).toMatchObject({
+      contract_version: "m2",
       subject_id: "issue-1",
       executor_provider_id: "openai-runtime",
       executor_provider_kind: ProviderKind.OpenAI,
       executor_model: "gpt-5.4",
       outcome: HeartbeatOutcome.Patched,
       rollback_to_version: 1,
+      evidence: {
+        verification_required: true,
+        independent_verifier_required: true,
+        handoff_ready: true,
+        commands: ["npm run runtime:fixture", "npm run typecheck", "npm test"],
+        missing_artifacts: [],
+      },
       replay: {
         subject_id: "issue-1",
         verification_ids: ["verify-prev"],
@@ -163,6 +171,7 @@ describe("programmatic executable runtime", () => {
       },
       recovery: {
         attempted: false,
+        outcome_classification: "not_needed",
         strategy: "none",
         rollback_to_version: 1,
         repo_restored: false,
@@ -170,6 +179,53 @@ describe("programmatic executable runtime", () => {
         reason: null,
       },
     });
+    expect(result.verification_handoff.evidence.artifacts).toEqual([
+      {
+        label: "canonical state snapshot",
+        kind: "state_snapshot",
+        path: "state://completed",
+        required: true,
+        status: "present",
+      },
+      {
+        label: "verification replay history",
+        kind: "verification_replay",
+        path: "state://verification_handoff/replay",
+        required: true,
+        status: "present",
+      },
+      {
+        label: "runtime execution log",
+        kind: "execution_log",
+        path: "workspace://artifacts/runtime.log",
+        required: false,
+        status: "pending",
+      },
+      {
+        label: "recovery record",
+        kind: "recovery_record",
+        path: "state://recovery",
+        required: false,
+        status: "pending",
+      },
+    ]);
+    expect(result.verification_handoff.recovery.steps).toEqual([
+      {
+        step: "repo_restore",
+        status: "skipped",
+        detail: "execution completed without rollback",
+      },
+      {
+        step: "state_rollback",
+        status: "skipped",
+        detail: "execution completed without rollback",
+      },
+      {
+        step: "issue_requeue",
+        status: "skipped",
+        detail: "execution completed without requeue",
+      },
+    ]);
     expect(await repo.read("artifacts/runtime.log")).toBe(
       "Connect heartbeat records to the runtime entrypoint :: wire runtime",
     );
@@ -289,13 +345,20 @@ describe("programmatic executable runtime", () => {
       },
     });
     expect(result.recovered).toEqual(result.completed);
-    expect(result.verification_handoff).toEqual({
+    expect(result.verification_handoff).toMatchObject({
+      contract_version: "m2",
       subject_id: "issue-rollback",
       executor_provider_id: "openai-runtime",
       executor_provider_kind: ProviderKind.OpenAI,
       executor_model: "gpt-5.4",
       outcome: HeartbeatOutcome.Blocked,
       rollback_to_version: 0,
+      evidence: {
+        verification_required: true,
+        independent_verifier_required: true,
+        handoff_ready: true,
+        missing_artifacts: [],
+      },
       replay: {
         subject_id: "issue-rollback",
         verification_ids: ["verify-fail", "verify-requeue"],
@@ -326,6 +389,7 @@ describe("programmatic executable runtime", () => {
       },
       recovery: {
         attempted: true,
+        outcome_classification: "rolled_back_and_requeued",
         strategy: "rollback_and_requeue",
         rollback_to_version: 0,
         repo_restored: true,
@@ -333,6 +397,23 @@ describe("programmatic executable runtime", () => {
         reason: "verification replay requested rollback",
       },
     });
+    expect(result.verification_handoff.recovery.steps).toEqual([
+      {
+        step: "repo_restore",
+        status: "completed",
+        detail: "repository snapshot restored",
+      },
+      {
+        step: "state_rollback",
+        status: "completed",
+        detail: "state restored to version 0",
+      },
+      {
+        step: "issue_requeue",
+        status: "completed",
+        detail: "issue returned to queued state after failure",
+      },
+    ]);
     expect(() => repo.read("artifacts/runtime.log")).toThrow(
       "repo path not found: artifacts/runtime.log",
     );

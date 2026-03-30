@@ -74,7 +74,22 @@ export async function runRuntimeFixtureCli(
         runtime_log_path: runtimeLogPath,
         heartbeat: result.heartbeat,
         completed: result.completed,
-        verification_handoff: result.verification_handoff,
+        verification_handoff: buildSummaryVerificationHandoff({
+          scenario: options.scenario,
+          artifactDir,
+          workspaceDir,
+          summaryPath,
+          runtimeLogPath,
+          handoff: result.verification_handoff,
+        }),
+        verification_evidence: buildVerificationEvidenceSummary({
+          scenario: options.scenario,
+          artifactDir,
+          workspaceDir,
+          summaryPath,
+          runtimeLogPath,
+          handoff: result.verification_handoff,
+        }),
         recovered: result.recovered ?? null,
       },
       null,
@@ -90,6 +105,85 @@ export async function runRuntimeFixtureCli(
     workspaceDir,
     summaryPath,
     runtimeLogPath,
+  };
+}
+
+export function buildSummaryVerificationHandoff(input: {
+  scenario: RuntimeFixtureScenario;
+  artifactDir: string;
+  workspaceDir: string;
+  summaryPath: string;
+  runtimeLogPath: string;
+  handoff: Awaited<ReturnType<typeof runExecutableRuntime>>["verification_handoff"];
+}) {
+  const runtimeLogStatus = input.scenario === "success" ? "present" : "pending";
+
+  return {
+    ...input.handoff,
+    evidence: {
+      ...input.handoff.evidence,
+      artifacts: input.handoff.evidence.artifacts.map((artifact) => {
+        if (artifact.kind === "execution_log") {
+          return {
+            ...artifact,
+            path: input.runtimeLogPath,
+            required: true,
+            status: runtimeLogStatus,
+          };
+        }
+
+        if (artifact.kind === "state_snapshot") {
+          return {
+            ...artifact,
+            path: `${input.summaryPath}#completed`,
+          };
+        }
+
+        if (artifact.kind === "verification_replay") {
+          return {
+            ...artifact,
+            path: `${input.summaryPath}#verification_handoff.replay`,
+          };
+        }
+
+        if (artifact.kind === "recovery_record") {
+          return {
+            ...artifact,
+            path: `${input.summaryPath}#verification_handoff.recovery`,
+          };
+        }
+
+        return artifact;
+      }),
+      missing_artifacts:
+        input.scenario === "success" ? [] : [input.runtimeLogPath],
+    },
+  };
+}
+
+export function buildVerificationEvidenceSummary(input: {
+  scenario: RuntimeFixtureScenario;
+  artifactDir: string;
+  workspaceDir: string;
+  summaryPath: string;
+  runtimeLogPath: string;
+  handoff: Awaited<ReturnType<typeof runExecutableRuntime>>["verification_handoff"];
+}) {
+  return {
+    contract_version: input.handoff.contract_version,
+    scenario: input.scenario,
+    promotion_gate:
+      input.handoff.evidence.independent_verifier_required && input.scenario === "success"
+        ? "waiting_for_independent_verifier"
+        : input.handoff.outcome === HeartbeatOutcome.Blocked
+          ? "rollback_and_requeue_recorded"
+          : "not_required",
+    validation_commands: input.handoff.evidence.commands,
+    artifact_dir: input.artifactDir,
+    workspace_dir: input.workspaceDir,
+    summary_path: input.summaryPath,
+    runtime_log_path: input.runtimeLogPath,
+    recovery_outcome: input.handoff.recovery.outcome_classification,
   };
 }
 
