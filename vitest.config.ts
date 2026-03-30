@@ -6,6 +6,9 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       exclude: [
+        ".tmp-runtime-dist/**",
+        "artifacts/**",
+        "scripts/**",
         "src/contracts/types.ts",
         "src/skills/contracts.ts",
         "vitest.config.ts",

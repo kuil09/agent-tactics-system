@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "runtime:fixture": "node scripts/run-runtime-fixture.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
