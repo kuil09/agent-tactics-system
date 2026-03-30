@@ -230,4 +230,32 @@ describe("turn loop", () => {
       state: { status: "done_candidate" },
     });
   });
+
+  it("rejects promotion when the state is not a done candidate and exposes queue stats", async () => {
+    const loop = new TurnLoop(new StateStore<Record<string, unknown>>({ status: "queued" }));
+
+    await expect(
+      loop.promoteDoneCandidate({
+        issue_id: "issue-1",
+        actor_id: "system-orchestrator",
+        verified_patch_id: "patch-verified",
+        complete_patch_id: "patch-complete",
+        subject_id: "issue-1",
+        executor_provider_id: "openai-prod",
+        executor_provider_kind: ProviderKind.OpenAI,
+        executor_model: "gpt-5.4",
+        verifier: {
+          provider_id: "claude-prod",
+          provider_kind: ProviderKind.Claude,
+          model: "claude-sonnet-4",
+        },
+        verification_record: null,
+      }),
+    ).rejects.toThrow("only done_candidate state can be promoted");
+
+    expect(loop.getQueueStats()).toEqual({
+      pending_writes: 0,
+      in_flight_writes: 0,
+    });
+  });
 });

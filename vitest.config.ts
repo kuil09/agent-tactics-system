@@ -3,5 +3,20 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts"],
+    coverage: {
+      provider: "v8",
+      exclude: [
+        "src/contracts/types.ts",
+        "src/skills/contracts.ts",
+        "vitest.config.ts",
+      ],
+      reporter: ["text", "text-summary", "lcov"],
+      thresholds: {
+        lines: 100,
+        statements: 100,
+        functions: 100,
+        branches: 100,
+      },
+    },
   },
 });
