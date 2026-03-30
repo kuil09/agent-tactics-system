@@ -136,4 +136,36 @@ describe("completion verification", () => {
       }),
     ).toThrow(VerificationPolicyError);
   });
+
+  it("rejects verification records that do not match the selected verifier identity", () => {
+    const decision = evaluateCompletionVerification({
+      subject_id: "issue-1",
+      executor_provider_id: "openai-prod",
+      executor_provider_kind: ProviderKind.OpenAI,
+      executor_model: "gpt-5.4",
+      verifier: {
+        provider_id: "claude-prod",
+        provider_kind: ProviderKind.Claude,
+        model: "claude-sonnet-4",
+      },
+      verification_record: {
+        verification_id: "verify-2",
+        subject_id: "issue-1",
+        subject_kind: VerificationSubjectKind.Task,
+        verifier_provider_id: "other-verifier",
+        verifier_model: "other-model",
+        status: VerificationStatus.Pass,
+        evidence: ["npm test"],
+        created_at: "2026-03-30T00:00:00Z",
+      },
+    });
+
+    expect(decision.approved).toBe(false);
+    expect(decision.reasons).toContain(
+      "verification record provider does not match the selected verifier",
+    );
+    expect(decision.reasons).toContain(
+      "verification record model does not match the selected verifier",
+    );
+  });
 });

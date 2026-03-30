@@ -1,3 +1,7 @@
 node_modules/
 .DS_Store
 .agents/
+coverage/
+coverage-output.txt
+.tmp-runtime-dist/
+artifacts/runtime-fixtures/

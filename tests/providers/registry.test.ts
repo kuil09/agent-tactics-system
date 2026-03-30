@@ -57,4 +57,93 @@ describe("provider registry", () => {
       AssignmentMode.DecomposeOnly,
     ]);
   });
+
+  it("infers trust tiers for each provider family", () => {
+    expect(
+      createProviderRegistryEntry({
+        provider_id: "claude-prod",
+        provider_kind: ProviderKind.Claude,
+        transport: Transport.Api,
+        models: [],
+      }).trust_tier,
+    ).toBe(TrustTier.T3);
+    expect(
+      createProviderRegistryEntry({
+        provider_id: "cursor-prod",
+        provider_kind: ProviderKind.Cursor,
+        transport: Transport.Cli,
+        models: [],
+      }).trust_tier,
+    ).toBe(TrustTier.T1);
+    expect(
+      createProviderRegistryEntry({
+        provider_id: "opencode-prod",
+        provider_kind: ProviderKind.OpenCode,
+        transport: Transport.Cli,
+        models: [],
+      }).trust_tier,
+    ).toBe(TrustTier.T1);
+    expect(
+      createProviderRegistryEntry({
+        provider_id: "local-prod",
+        provider_kind: ProviderKind.LocalOpenAICompatible,
+        transport: Transport.Embedded,
+        models: [],
+      }).trust_tier,
+    ).toBe(TrustTier.T0);
+  });
+
+  it("rejects providers without heartbeat or with failing microbench evidence", () => {
+    expect(
+      deriveAssignmentModes(TrustTier.T3, {
+        registered: true,
+        protocol_compliant: true,
+        heartbeat_ok: false,
+        microbench_status: MicrobenchStatus.Pass,
+        last_calibrated_at: "2026-03-30T00:00:00Z",
+      }),
+    ).toEqual([AssignmentMode.Reject]);
+
+    expect(
+      deriveAssignmentModes(TrustTier.T3, {
+        registered: true,
+        protocol_compliant: true,
+        heartbeat_ok: true,
+        microbench_status: MicrobenchStatus.Fail,
+        last_calibrated_at: "2026-03-30T00:00:00Z",
+      }),
+    ).toEqual([AssignmentMode.Reject]);
+  });
+
+  it("limits lower trust tiers to decomposition even after calibration", () => {
+    expect(
+      deriveAssignmentModes(TrustTier.T2, {
+        registered: true,
+        protocol_compliant: true,
+        heartbeat_ok: true,
+        microbench_status: MicrobenchStatus.Pass,
+        last_calibrated_at: "2026-03-30T00:00:00Z",
+      }),
+    ).toEqual([AssignmentMode.DecomposeOnly]);
+
+    expect(
+      deriveAssignmentModes(TrustTier.T0, {
+        registered: true,
+        protocol_compliant: true,
+        heartbeat_ok: true,
+        microbench_status: MicrobenchStatus.Pass,
+        last_calibrated_at: "2026-03-30T00:00:00Z",
+      }),
+    ).toEqual([AssignmentMode.Reject]);
+
+    expect(
+      deriveAssignmentModes(TrustTier.T4, {
+        registered: true,
+        protocol_compliant: true,
+        heartbeat_ok: true,
+        microbench_status: MicrobenchStatus.Pass,
+        last_calibrated_at: "2026-03-30T00:00:00Z",
+      }),
+    ).toEqual([AssignmentMode.Direct, AssignmentMode.DecomposeOnly]);
+  });
 });
