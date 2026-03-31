@@ -19,10 +19,10 @@ try {
     "--skipLibCheck",
     "--types",
     "node",
-    "src/runtime/cli.ts",
+    "src/runtime/cli-main.ts",
   ]);
 
-  run("node", [join(distDir, "runtime/cli.js"), ...process.argv.slice(2)]);
+  run("node", [join(distDir, "runtime/cli-main.js"), ...process.argv.slice(2)]);
 } finally {
   await rm(distDir, { recursive: true, force: true });
 }

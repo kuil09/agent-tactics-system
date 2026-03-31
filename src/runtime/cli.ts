@@ -1,5 +1,6 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   HeartbeatOutcome,
@@ -35,6 +36,22 @@ export interface RuntimeFixtureCliResult {
   runtimeLogPath: string;
 }
 
+export interface RuntimeFixtureOperatorSummary {
+  operational_flow: "single_workspace_runtime_fixture";
+  scenario: RuntimeFixtureScenario;
+  final_status: "pending_approval_and_verification" | "failed_and_requeued";
+  decision: string;
+  next_action: string;
+  key_paths: {
+    artifact_dir: string;
+    workspace_dir: string;
+    summary_path: string;
+    runtime_log_path: string;
+    governance_path: string;
+  };
+  checks: string[];
+}
+
 export async function runRuntimeFixtureCli(
   options: RuntimeFixtureCliOptions,
 ): Promise<RuntimeFixtureCliResult> {
@@ -62,6 +79,14 @@ export async function runRuntimeFixtureCli(
   });
 
   await mkdir(dirname(summaryPath), { recursive: true });
+  const operatorSummary = buildOperatorSummary({
+    scenario: options.scenario,
+    artifactDir,
+    workspaceDir,
+    summaryPath,
+    runtimeLogPath,
+    handoff: result.verification_handoff,
+  });
   await writeFile(
     summaryPath,
     `${JSON.stringify(
@@ -90,6 +115,7 @@ export async function runRuntimeFixtureCli(
           runtimeLogPath,
           handoff: result.verification_handoff,
         }),
+        operator_summary: operatorSummary,
         recovered: result.recovered ?? null,
       },
       null,
@@ -153,6 +179,13 @@ export function buildSummaryVerificationHandoff(input: {
           };
         }
 
+        if (artifact.kind === "approval_record") {
+          return {
+            ...artifact,
+            path: `${input.summaryPath}#verification_handoff.governance.approval_gate`,
+          };
+        }
+
         return artifact;
       }),
       missing_artifacts:
@@ -173,17 +206,78 @@ export function buildVerificationEvidenceSummary(input: {
     contract_version: input.handoff.contract_version,
     scenario: input.scenario,
     promotion_gate:
-      input.handoff.evidence.independent_verifier_required && input.scenario === "success"
-        ? "waiting_for_independent_verifier"
-        : input.handoff.outcome === HeartbeatOutcome.Blocked
+      input.handoff.outcome === HeartbeatOutcome.Blocked
           ? "rollback_and_requeue_recorded"
-          : "not_required",
+          : input.handoff.evidence.approval_required &&
+              input.handoff.evidence.independent_verifier_required &&
+              input.scenario === "success"
+            ? "waiting_for_human_approval_and_independent_verifier"
+            : input.handoff.evidence.approval_required && input.scenario === "success"
+              ? "waiting_for_human_approval"
+              : input.handoff.evidence.independent_verifier_required && input.scenario === "success"
+                ? "waiting_for_independent_verifier"
+                : "not_required",
+    approval_status: input.handoff.evidence.approval_status,
+    approval_artifact_path: input.handoff.governance.approval_gate.artifact_path
+      ? `${input.summaryPath}#verification_handoff.governance.approval_gate`
+      : null,
+    authorization_exception: input.handoff.governance.authorization_boundary.exception,
+    input_boundary_summary: input.handoff.governance.input_defense.map((entry) => ({
+      input_ref: entry.input_ref,
+      input_kind: entry.input_kind,
+      trust_zone: entry.trust_zone,
+    })),
+    audit_trail_paths: input.handoff.governance.audit_trail.map((entry) => entry.path),
     validation_commands: input.handoff.evidence.commands,
     artifact_dir: input.artifactDir,
     workspace_dir: input.workspaceDir,
     summary_path: input.summaryPath,
     runtime_log_path: input.runtimeLogPath,
     recovery_outcome: input.handoff.recovery.outcome_classification,
+  };
+}
+
+export function buildOperatorSummary(input: {
+  scenario: RuntimeFixtureScenario;
+  artifactDir: string;
+  workspaceDir: string;
+  summaryPath: string;
+  runtimeLogPath: string;
+  handoff: Awaited<ReturnType<typeof runExecutableRuntime>>["verification_handoff"];
+}): RuntimeFixtureOperatorSummary {
+  return {
+    operational_flow: "single_workspace_runtime_fixture",
+    scenario: input.scenario,
+    final_status:
+      input.scenario === "success" ? "pending_approval_and_verification" : "failed_and_requeued",
+    decision:
+      input.scenario === "success"
+        ? "Runtime execution finished, but promotion remains closed until a human approval artifact and independent verification are both present."
+        : "Runtime execution failed. Rollback and requeue were recorded for the next attempt.",
+    next_action:
+      input.scenario === "success"
+        ? "Open run-result.json, confirm governance.approval_gate and input_defense, then collect the approval artifact and run the listed validation commands."
+        : "Open run-result.json, confirm recovery.steps and missing_artifacts, then inspect the requeued inputs before retrying.",
+    key_paths: {
+      artifact_dir: input.artifactDir,
+      workspace_dir: input.workspaceDir,
+      summary_path: input.summaryPath,
+      runtime_log_path: input.runtimeLogPath,
+      governance_path: `${input.summaryPath}#verification_handoff.governance`,
+    },
+    checks:
+      input.scenario === "success"
+        ? [
+            "heartbeat.outcome must be patched",
+            "verification_evidence.promotion_gate must be waiting_for_human_approval_and_independent_verifier",
+            "verification_handoff.governance.approval_gate.status must be pending_human_approval",
+            "runtime_log_path must exist",
+          ]
+        : [
+            "heartbeat.outcome must be blocked",
+            "verification_evidence.promotion_gate must be rollback_and_requeue_recorded",
+            "verification_handoff.recovery.steps must show repo_restore, state_rollback, and issue_requeue as completed",
+          ],
   };
 }
 
@@ -228,8 +322,8 @@ function createRuntimeFixture(
     turn_number: scenario === "success" ? 1 : 2,
     inputs_summary:
       scenario === "success"
-        ? "Replay the shared runtime success path"
-        : "Replay the shared runtime rollback path",
+        ? "Replay the shared runtime success path with a pending approval gate"
+        : "Replay the shared runtime rollback path with approval evidence preserved",
     allowed_action_budget: {
       tool_calls: 8,
       write_ops: 3,
@@ -250,13 +344,17 @@ function createRuntimeFixture(
         kind: TaskInputKind.File,
         ref: "src/task.txt",
       },
+      {
+        kind: TaskInputKind.ExternalNote,
+        ref: "browser://operator-approval-request",
+      },
     ],
     allowed_tools: ["node", "vitest"],
     write_scope: ["src", "tests", "artifacts"],
     must_not: ["modify docs/architecture.md"],
     done_when:
       scenario === "success"
-        ? ["runtime fixture completes and emits artifacts"]
+        ? ["runtime fixture completes and emits approval-gated artifacts"]
         : ["runtime fixture requeues after rollback"],
     stop_conditions: ["missing skill"],
     output_schema_ref: "schemas/verification-record.schema.json",
@@ -346,6 +444,9 @@ async function seedWorkspace(
 async function main(): Promise<void> {
   const scenario = parseScenario(process.argv.slice(2));
   const result = await runRuntimeFixtureCli({ scenario });
+  const summary = JSON.parse(await readFile(result.summaryPath, "utf8")) as {
+    operator_summary: RuntimeFixtureOperatorSummary;
+  };
 
   process.stdout.write(
     `${JSON.stringify(
@@ -356,6 +457,7 @@ async function main(): Promise<void> {
         workspace_dir: result.workspaceDir,
         summary_path: result.summaryPath,
         runtime_log_path: result.runtimeLogPath,
+        operator_summary: summary.operator_summary,
       },
       null,
       2,
@@ -388,8 +490,9 @@ export function coerceScenario(value: string | undefined): RuntimeFixtureScenari
 }
 /* c8 ignore start */
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;
+const modulePath = fileURLToPath(import.meta.url);
 
-if (invokedPath === resolve(import.meta.filename)) {
+if (invokedPath === resolve(modulePath)) {
   main().catch((error) => {
     const message = error instanceof Error ? error.stack ?? error.message : String(error);
     process.stderr.write(`${message}\n`);

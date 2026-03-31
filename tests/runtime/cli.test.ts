@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  buildOperatorSummary,
   buildSummaryVerificationHandoff,
   buildVerificationEvidenceSummary,
   coerceScenario,
@@ -29,16 +30,29 @@ describe("runtime fixture cli", () => {
 
       const summary = JSON.parse(await readFile(result.summaryPath, "utf8")) as {
         outcome: string;
+        operator_summary: {
+          final_status: string;
+          key_paths: { runtime_log_path: string; governance_path: string };
+        };
         verification_handoff: {
           contract_version: string;
           evidence: { artifacts: Array<{ kind: string; path: string; status: string }> };
+          governance: {
+            approval_gate: { status: string };
+          };
           recovery: { attempted: boolean };
         };
-        verification_evidence: { promotion_gate: string; summary_path: string };
+        verification_evidence: {
+          promotion_gate: string;
+          summary_path: string;
+          approval_status: string;
+          authorization_exception: string;
+          input_boundary_summary: Array<{ input_kind: string; trust_zone: string }>;
+        };
       };
 
       expect(summary.outcome).toBe("patched");
-      expect(summary.verification_handoff.contract_version).toBe("m2");
+      expect(summary.verification_handoff.contract_version).toBe("m4");
       expect(summary.verification_handoff.recovery.attempted).toBe(false);
       expect(
         summary.verification_handoff.evidence.artifacts.find(
@@ -49,9 +63,36 @@ describe("runtime fixture cli", () => {
         path: result.runtimeLogPath,
         status: "present",
       });
+      expect(
+        summary.verification_handoff.evidence.artifacts.find(
+          (artifact) => artifact.kind === "approval_record",
+        ),
+      ).toMatchObject({
+        kind: "approval_record",
+        path: `${result.summaryPath}#verification_handoff.governance.approval_gate`,
+        status: "present",
+      });
       expect(summary.verification_evidence).toMatchObject({
-        promotion_gate: "waiting_for_independent_verifier",
+        promotion_gate: "waiting_for_human_approval_and_independent_verifier",
+        approval_status: "pending_human_approval",
+        authorization_exception:
+          "promotion to complete is denied without a recorded human approval artifact and approval:grant permission",
         summary_path: result.summaryPath,
+      });
+      expect(summary.verification_evidence.input_boundary_summary).toContainEqual({
+        input_kind: "external_note",
+        input_ref: "browser://operator-approval-request",
+        trust_zone: "untrusted_external_input",
+      });
+      expect(summary.verification_handoff.governance.approval_gate.status).toBe(
+        "pending_human_approval",
+      );
+      expect(summary.operator_summary).toMatchObject({
+        final_status: "pending_approval_and_verification",
+        key_paths: {
+          runtime_log_path: result.runtimeLogPath,
+          governance_path: `${result.summaryPath}#verification_handoff.governance`,
+        },
       });
     } finally {
       await rm(rootDir, { recursive: true, force: true });
@@ -72,15 +113,26 @@ describe("runtime fixture cli", () => {
 
       const summary = JSON.parse(await readFile(result.summaryPath, "utf8")) as {
         outcome: string;
+        operator_summary: {
+          final_status: string;
+          checks: string[];
+        };
         verification_handoff: {
           evidence: { missing_artifacts: string[] };
+          governance: {
+            approval_gate: { status: string };
+          };
           recovery: {
             attempted: boolean;
             repo_restored: boolean;
             outcome_classification: string;
           };
         };
-        verification_evidence: { promotion_gate: string; runtime_log_path: string };
+        verification_evidence: {
+          promotion_gate: string;
+          runtime_log_path: string;
+          approval_status: string;
+        };
       };
 
       expect(summary.outcome).toBe("blocked");
@@ -94,8 +146,16 @@ describe("runtime fixture cli", () => {
       ]);
       expect(summary.verification_evidence).toMatchObject({
         promotion_gate: "rollback_and_requeue_recorded",
+        approval_status: "blocked_by_recovery",
         runtime_log_path: result.runtimeLogPath,
       });
+      expect(summary.verification_handoff.governance.approval_gate.status).toBe(
+        "blocked_by_recovery",
+      );
+      expect(summary.operator_summary.final_status).toBe("failed_and_requeued");
+      expect(summary.operator_summary.checks).toContain(
+        "heartbeat.outcome must be blocked",
+      );
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }
@@ -127,7 +187,7 @@ describe("runtime fixture cli", () => {
 
   it("summarizes non-required verification evidence and preserves unknown artifacts", () => {
     const handoff = {
-      contract_version: "m2" as const,
+      contract_version: "m4" as const,
       subject_id: "issue-cli-helper",
       executor_provider_id: "openai-runtime",
       executor_provider_kind: ProviderKind.OpenAI,
@@ -152,8 +212,10 @@ describe("runtime fixture cli", () => {
       evidence: {
         verification_required: false,
         independent_verifier_required: false,
+        approval_required: false,
+        approval_status: "not_required" as const,
         handoff_ready: true,
-        summary: "runtime completed without an independent verifier requirement",
+        summary: "runtime completed without an independent verifier or approval requirement",
         commands: ["npm run runtime:fixture"],
         artifacts: [
           {
@@ -165,6 +227,25 @@ describe("runtime fixture cli", () => {
           } as never,
         ],
         missing_artifacts: [],
+      },
+      governance: {
+        approval_gate: {
+          policy_id: "human_approval_required_for_promotion" as const,
+          approval_required: false,
+          status: "not_required" as const,
+          approver_role: "human_operator" as const,
+          artifact_path: null,
+          promotion_blocked: false,
+          rationale: "This envelope does not require a separate human approval gate.",
+        },
+        authorization_boundary: {
+          promotion_action: "promote_done_candidate_to_complete" as const,
+          required_permission: "approval:grant" as const,
+          allowed: true,
+          exception: null,
+        },
+        input_defense: [],
+        audit_trail: [],
       },
       recovery: {
         attempted: false,
@@ -194,6 +275,14 @@ describe("runtime fixture cli", () => {
       runtimeLogPath: "/tmp/workspace/artifacts/runtime.log",
       handoff,
     });
+    const operatorSummary = buildOperatorSummary({
+      scenario: "success",
+      artifactDir: "/tmp/artifacts",
+      workspaceDir: "/tmp/workspace",
+      summaryPath: "/tmp/run-result.json",
+      runtimeLogPath: "/tmp/workspace/artifacts/runtime.log",
+      handoff,
+    });
 
     expect(summarized.evidence.artifacts).toEqual([
       {
@@ -205,9 +294,18 @@ describe("runtime fixture cli", () => {
       },
     ]);
     expect(evidenceSummary).toMatchObject({
-      contract_version: "m2",
+      contract_version: "m4",
       promotion_gate: "not_required",
+      approval_status: "not_required",
       recovery_outcome: "not_needed",
+    });
+    expect(operatorSummary).toMatchObject({
+      operational_flow: "single_workspace_runtime_fixture",
+      final_status: "pending_approval_and_verification",
+      key_paths: {
+        summary_path: "/tmp/run-result.json",
+        governance_path: "/tmp/run-result.json#verification_handoff.governance",
+      },
     });
   });
 });
