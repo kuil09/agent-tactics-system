@@ -1,4 +1,9 @@
-import { HeartbeatOutcome, PatchOperation, ProviderKind } from "../contracts/enums.js";
+import {
+  HeartbeatOutcome,
+  PatchOperation,
+  ProviderKind,
+  TaskInputKind,
+} from "../contracts/enums.js";
 import type {
   HeartbeatRecord,
   StateOperation,
@@ -32,6 +37,7 @@ export interface ExecutableRuntimeState extends CanonicalState {
     required_skill_ids: string[];
   };
   verification_handoff?: VerificationHandoff;
+  governance?: GovernanceEvidence;
   recovery?: RuntimeRecoveryState;
   execution_error?: {
     message: string;
@@ -39,7 +45,7 @@ export interface ExecutableRuntimeState extends CanonicalState {
 }
 
 export interface VerificationHandoff {
-  contract_version: "m2";
+  contract_version: "m4";
   subject_id: string;
   executor_provider_id: string;
   executor_provider_kind: ProviderKind;
@@ -48,12 +54,20 @@ export interface VerificationHandoff {
   rollback_to_version: number | null;
   replay: VerificationReplaySummary;
   evidence: VerificationEvidenceBundle;
+  governance: GovernanceEvidence;
   recovery: RuntimeRecoveryState;
 }
+
+export type ApprovalGateStatus =
+  | "pending_human_approval"
+  | "not_required"
+  | "blocked_by_recovery";
 
 export interface VerificationEvidenceBundle {
   verification_required: boolean;
   independent_verifier_required: boolean;
+  approval_required: boolean;
+  approval_status: ApprovalGateStatus;
   handoff_ready: boolean;
   summary: string;
   commands: string[];
@@ -63,10 +77,56 @@ export interface VerificationEvidenceBundle {
 
 export interface VerificationArtifact {
   label: string;
-  kind: "state_snapshot" | "verification_replay" | "execution_log" | "recovery_record";
+  kind:
+    | "state_snapshot"
+    | "verification_replay"
+    | "execution_log"
+    | "recovery_record"
+    | "approval_record";
   path: string;
   required: boolean;
   status: "present" | "pending";
+}
+
+export interface GovernanceEvidence {
+  approval_gate: ApprovalGateEvidence;
+  authorization_boundary: AuthorizationBoundaryEvidence;
+  input_defense: InputDefenseEvidence[];
+  audit_trail: GovernanceAuditEntry[];
+}
+
+export interface ApprovalGateEvidence {
+  policy_id: "human_approval_required_for_promotion";
+  approval_required: boolean;
+  status: ApprovalGateStatus;
+  approver_role: "human_operator";
+  artifact_path: string | null;
+  promotion_blocked: boolean;
+  rationale: string;
+}
+
+export interface AuthorizationBoundaryEvidence {
+  promotion_action: "promote_done_candidate_to_complete";
+  required_permission: "approval:grant";
+  allowed: boolean;
+  exception: string | null;
+}
+
+export interface InputDefenseEvidence {
+  input_ref: string;
+  input_kind: TaskInputKind;
+  trust_zone: "trusted_workspace" | "trusted_runtime_state" | "untrusted_external_input";
+  handling_rule: string;
+}
+
+export interface GovernanceAuditEntry {
+  event:
+    | "approval_gate_declared"
+    | "input_boundary_recorded"
+    | "promotion_blocked"
+    | "rollback_recorded";
+  path: string;
+  detail: string;
 }
 
 export interface RuntimeRecoveryState {
@@ -165,9 +225,13 @@ export async function runExecutableRuntime(
       skill_loader: input.skill_loader,
       required_skill_ids: input.required_skill_ids,
     });
+    const governance = buildGovernanceEvidence({
+      envelope: input.envelope,
+      outcome: HeartbeatOutcome.Patched,
+    });
 
     const verificationHandoff: VerificationHandoff = {
-      contract_version: "m2",
+      contract_version: "m4",
       subject_id: input.heartbeat.issue_id,
       executor_provider_id: executed.result.provider_id,
       executor_provider_kind: input.provider.provider_kind ?? ProviderKind.Other,
@@ -179,10 +243,13 @@ export async function runExecutableRuntime(
         input.verification_records ?? [],
       ),
       evidence: buildVerificationEvidence({
+        envelope: input.envelope,
+        outcome: HeartbeatOutcome.Patched,
         verificationRequired: input.envelope.verification_required,
         rollbackToVersion: issuedPatch.version,
         recoveryAttempted: false,
       }),
+      governance,
       recovery: {
         attempted: false,
         outcome_classification: "not_needed",
@@ -245,6 +312,11 @@ export async function runExecutableRuntime(
           op: PatchOperation.Add,
           path: "/verification_handoff",
           value: verificationHandoff,
+        },
+        {
+          op: PatchOperation.Add,
+          path: "/governance",
+          value: governance,
         },
         {
           op: PatchOperation.Add,
@@ -342,8 +414,12 @@ export async function runExecutableRuntime(
         },
       ],
     };
+    const governance = buildGovernanceEvidence({
+      envelope: input.envelope,
+      outcome: HeartbeatOutcome.Blocked,
+    });
     const verificationHandoff: VerificationHandoff = {
-      contract_version: "m2",
+      contract_version: "m4",
       subject_id: input.heartbeat.issue_id,
       executor_provider_id: input.provider.provider_id,
       executor_provider_kind: input.provider.provider_kind ?? ProviderKind.Other,
@@ -355,10 +431,13 @@ export async function runExecutableRuntime(
         input.verification_records ?? [],
       ),
       evidence: buildVerificationEvidence({
+        envelope: input.envelope,
+        outcome: HeartbeatOutcome.Blocked,
         verificationRequired: input.envelope.verification_required,
         rollbackToVersion: executionRollbackVersion,
         recoveryAttempted: true,
       }),
+      governance,
       recovery: recoveryState,
     };
     const recoveredPatch = await loop.runWrite(({ getSnapshot }) => ({
@@ -392,6 +471,11 @@ export async function runExecutableRuntime(
           op: PatchOperation.Add,
           path: "/verification_handoff",
           value: verificationHandoff,
+        },
+        {
+          op: PatchOperation.Add,
+          path: "/governance",
+          value: governance,
         },
         {
           op: PatchOperation.Add,
@@ -430,10 +514,16 @@ export async function runExecutableRuntime(
 }
 
 function buildVerificationEvidence(input: {
+  envelope: TaskEnvelope;
+  outcome: HeartbeatOutcome;
   verificationRequired: boolean;
   rollbackToVersion: number | null;
   recoveryAttempted: boolean;
 }): VerificationEvidenceBundle {
+  const governance = buildGovernanceEvidence({
+    envelope: input.envelope,
+    outcome: input.outcome,
+  });
   const artifacts: VerificationArtifact[] = [
     {
       label: "canonical state snapshot",
@@ -457,6 +547,13 @@ function buildVerificationEvidence(input: {
       status: "pending",
     },
     {
+      label: "approval gate record",
+      kind: "approval_record",
+      path: "state://verification_handoff/governance/approval_gate",
+      required: governance.approval_gate.approval_required,
+      status: governance.approval_gate.approval_required ? "present" : "pending",
+    },
+    {
       label: "recovery record",
       kind: "recovery_record",
       path: "state://recovery",
@@ -472,14 +569,119 @@ function buildVerificationEvidence(input: {
   return {
     verification_required: input.verificationRequired,
     independent_verifier_required: input.verificationRequired,
+    approval_required: governance.approval_gate.approval_required,
+    approval_status: governance.approval_gate.status,
     handoff_ready: missingArtifacts.length === 0,
     summary: input.verificationRequired
-      ? "independent verifier evidence is required before promotion"
-      : "runtime completed without an independent verifier requirement",
+      ? "independent verifier evidence and a recorded human approval are required before promotion"
+      : "runtime completed without an independent verifier or approval requirement",
     commands: ["npm run runtime:fixture", "npm run typecheck", "npm test"],
     artifacts,
     missing_artifacts: missingArtifacts,
   };
+}
+
+function buildGovernanceEvidence(input: {
+  envelope: TaskEnvelope;
+  outcome: HeartbeatOutcome;
+}): GovernanceEvidence {
+  const approvalRequired = input.envelope.verification_required;
+  const approvalStatus: ApprovalGateStatus = !approvalRequired
+    ? "not_required"
+    : input.outcome === HeartbeatOutcome.Blocked
+      ? "blocked_by_recovery"
+      : "pending_human_approval";
+  const approvalArtifactPath = approvalRequired
+    ? "state://verification_handoff/governance/approval_gate"
+    : null;
+  const inputDefense = input.envelope.inputs.map(buildInputDefenseEvidence);
+  const auditTrail: GovernanceAuditEntry[] = [
+    {
+      event: "approval_gate_declared",
+      path: "state://verification_handoff/governance/approval_gate",
+      detail: approvalRequired
+        ? "promotion requires a recorded human approval artifact"
+        : "approval gate not required for this envelope",
+    },
+    {
+      event: "input_boundary_recorded",
+      path: "state://verification_handoff/governance/input_defense",
+      detail: "input trust boundaries were recorded before promotion",
+    },
+  ];
+
+  if (approvalStatus === "pending_human_approval") {
+    auditTrail.push({
+      event: "promotion_blocked",
+      path: "state://status",
+      detail: "runtime remains in done_candidate until approval:grant is satisfied",
+    });
+  }
+
+  if (approvalStatus === "blocked_by_recovery") {
+    auditTrail.push({
+      event: "rollback_recorded",
+      path: "state://recovery",
+      detail: "approval action is deferred until rollback and requeue review completes",
+    });
+  }
+
+  return {
+    approval_gate: {
+      policy_id: "human_approval_required_for_promotion",
+      approval_required: approvalRequired,
+      status: approvalStatus,
+      approver_role: "human_operator",
+      artifact_path: approvalArtifactPath,
+      promotion_blocked: approvalStatus === "pending_human_approval",
+      rationale: approvalRequired
+        ? input.outcome === HeartbeatOutcome.Blocked
+          ? "Execution failed, so approval remains unavailable until recovery evidence is reviewed."
+          : "Execution reached done_candidate, but promotion stays closed until a human operator records approval."
+        : "This envelope does not require a separate human approval gate.",
+    },
+    authorization_boundary: {
+      promotion_action: "promote_done_candidate_to_complete",
+      required_permission: "approval:grant",
+      allowed: !approvalRequired,
+      exception: approvalRequired
+        ? "promotion to complete is denied without a recorded human approval artifact and approval:grant permission"
+        : null,
+    },
+    input_defense: inputDefense,
+    audit_trail: auditTrail,
+  };
+}
+
+function buildInputDefenseEvidence(input: {
+  kind: TaskInputKind;
+  ref: string;
+}): InputDefenseEvidence {
+  switch (input.kind) {
+    case TaskInputKind.File:
+      return {
+        input_ref: input.ref,
+        input_kind: input.kind,
+        trust_zone: "trusted_workspace",
+        handling_rule: "workspace file inputs stay inside the repo adapter and still require verification before promotion",
+      };
+    case TaskInputKind.StateSnapshot:
+      return {
+        input_ref: input.ref,
+        input_kind: input.kind,
+        trust_zone: "trusted_runtime_state",
+        handling_rule: "state snapshots may inform execution, but promotion still follows verification and approval gates",
+      };
+    case TaskInputKind.Issue:
+    case TaskInputKind.ExternalNote:
+    case TaskInputKind.Other:
+      return {
+        input_ref: input.ref,
+        input_kind: input.kind,
+        trust_zone: "untrusted_external_input",
+        handling_rule: "external text is treated as data only and cannot satisfy promotion or authorization checks by itself",
+      };
+  }
 }
 
 function buildStateSyncOperations(

@@ -78,9 +78,82 @@ What the CLI now fixes as the M2 verification seam:
 - Failure runs restore the workspace snapshot and record rollback, restore, and
   requeue steps as assertion-friendly recovery contract data in `run-result.json`
 
-The fixture is intentionally narrow. It proves the shared execution seam and M2
-artifact contract for richer verification evidence and rollback handling,
-without claiming production provider integration or approval workflow wiring.
+The fixture is intentionally narrow. It proves the shared execution seam and the
+extended M4 artifact contract for verification evidence, rollback handling, and
+a minimum approval gate, without claiming production provider integration or a
+fully embedded human approval workflow.
+
+## M3 Single Operational Flow
+
+The repository root now exposes one repeatable operator flow for a single
+workspace runtime run:
+
+```bash
+npm run runtime:fixture
+npm run runtime:fixture -- --scenario=failure
+```
+
+Use the flow like this:
+
+1. Start from the repository root and run one of the commands above.
+2. Open `artifacts/runtime-fixtures/<scenario>/run-result.json`.
+3. Read `operator_summary.decision`, `operator_summary.next_action`, and
+   `verification_evidence.promotion_gate`.
+4. Inspect the paths in `operator_summary.key_paths`.
+5. Confirm `verification_handoff.governance.approval_gate`,
+   `verification_handoff.governance.authorization_boundary`, and
+   `verification_handoff.governance.input_defense`.
+6. Run the validation commands listed in
+   `verification_handoff.evidence.commands`.
+
+Success path:
+
+- `heartbeat.outcome` is `patched`
+- `verification_evidence.promotion_gate` is
+  `waiting_for_human_approval_and_independent_verifier`
+- `verification_handoff.governance.approval_gate.status` is
+  `pending_human_approval`
+- `verification_handoff.governance.authorization_boundary.exception` records
+  the permission error that keeps promotion closed without approval
+- `verification_handoff.governance.input_defense` marks the external note input
+  as `untrusted_external_input`
+- `workspace/artifacts/runtime.log` exists and captures the executed objective
+- `run-result.json#verification_handoff.replay` shows the verification replay
+  history that must be reviewed before promotion
+
+Failure path:
+
+- `heartbeat.outcome` is `blocked`
+- `verification_evidence.promotion_gate` is
+  `rollback_and_requeue_recorded`
+- `run-result.json#verification_handoff.recovery.steps` records `repo_restore`,
+  `state_rollback`, and `issue_requeue`
+- `verification_handoff.evidence.missing_artifacts` tells the operator which
+  expected artifacts were not preserved after rollback
+
+This M3 slice fixes one end-to-end operational reference: assignment enters the
+runtime through a heartbeat record, state transitions are written into the
+summary snapshot, verification handoff is recorded in the same artifact, and
+success or rollback leaves a reproducible next-action summary for the operator.
+
+## M4 Minimum Approval Gate
+
+The same fixture now demonstrates one approval-gated promotion path for the v1
+reference implementation:
+
+- Success runs stop at `done_candidate` and record a human approval gate before
+  promotion to `complete`
+- `run-result.json#verification_handoff.governance.approval_gate` is the audit
+  trail for the approval requirement and expected approval artifact path
+- `run-result.json#verification_handoff.governance.authorization_boundary`
+  records the permission exception raised when promotion is attempted without
+  `approval:grant`
+- `run-result.json#verification_handoff.governance.input_defense` shows which
+  inputs are trusted workspace data versus untrusted external data
+
+This is intentionally a minimum gate, not a full approval product surface. The
+goal is to make promotion control, authorization failure, and external-input
+defense visible in one reproducible runtime artifact.
 
 ## Verification
 
@@ -98,8 +171,9 @@ Current expected result:
   `artifacts/runtime-fixtures/success/`
 - `npm run runtime:fixture -- --scenario=failure` exits successfully and writes
   rollback evidence to `artifacts/runtime-fixtures/failure/`
-- `run-result.json` exposes promotion-gate evidence for the verifier and a
-  rollback/requeue contract that tests can assert directly
+- `run-result.json` exposes promotion-gate evidence for both the verifier and a
+  human approval gate, plus a rollback/requeue contract that tests can assert
+  directly
 - `npm run typecheck` exits successfully
 - `npm test` passes the full Vitest suite
 - `npm run test:coverage` passes and enforces 100% lines/statements/functions/branches coverage
@@ -128,5 +202,5 @@ Runtime entrypoints:
    the shared M2 artifact contract.
 2. Extend recovery coverage to multi-file repo mutations and provider-side
    partial writes.
-3. Wire the same verification-evidence contract into approval workflow
-   promotion.
+3. Replace the minimum approval artifact with a first-class approval workflow
+   handoff once a real control-plane integration is in scope.

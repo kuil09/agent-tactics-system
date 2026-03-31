@@ -59,6 +59,10 @@ describe("programmatic executable runtime", () => {
           kind: TaskInputKind.File,
           ref: "src/task.txt",
         },
+        {
+          kind: TaskInputKind.ExternalNote,
+          ref: "browser://operator-approval-request",
+        },
       ],
       allowed_tools: ["rg", "vitest"],
       write_scope: ["src", "tests", "artifacts"],
@@ -130,10 +134,16 @@ describe("programmatic executable runtime", () => {
           record_id: "hb-1",
           outcome: HeartbeatOutcome.Patched,
         },
+        governance: {
+          approval_gate: {
+            status: "pending_human_approval",
+            promotion_blocked: true,
+          },
+        },
       },
     });
     expect(result.verification_handoff).toMatchObject({
-      contract_version: "m2",
+      contract_version: "m4",
       subject_id: "issue-1",
       executor_provider_id: "openai-runtime",
       executor_provider_kind: ProviderKind.OpenAI,
@@ -143,9 +153,22 @@ describe("programmatic executable runtime", () => {
       evidence: {
         verification_required: true,
         independent_verifier_required: true,
+        approval_required: true,
+        approval_status: "pending_human_approval",
         handoff_ready: true,
         commands: ["npm run runtime:fixture", "npm run typecheck", "npm test"],
         missing_artifacts: [],
+      },
+      governance: {
+        approval_gate: {
+          status: "pending_human_approval",
+          approver_role: "human_operator",
+          promotion_blocked: true,
+        },
+        authorization_boundary: {
+          required_permission: "approval:grant",
+          allowed: false,
+        },
       },
       replay: {
         subject_id: "issue-1",
@@ -202,11 +225,34 @@ describe("programmatic executable runtime", () => {
         status: "pending",
       },
       {
+        label: "approval gate record",
+        kind: "approval_record",
+        path: "state://verification_handoff/governance/approval_gate",
+        required: true,
+        status: "present",
+      },
+      {
         label: "recovery record",
         kind: "recovery_record",
         path: "state://recovery",
         required: false,
         status: "pending",
+      },
+    ]);
+    expect(result.verification_handoff.governance.input_defense).toEqual([
+      {
+        input_ref: "src/task.txt",
+        input_kind: TaskInputKind.File,
+        trust_zone: "trusted_workspace",
+        handling_rule:
+          "workspace file inputs stay inside the repo adapter and still require verification before promotion",
+      },
+      {
+        input_ref: "browser://operator-approval-request",
+        input_kind: TaskInputKind.ExternalNote,
+        trust_zone: "untrusted_external_input",
+        handling_rule:
+          "external text is treated as data only and cannot satisfy promotion or authorization checks by itself",
       },
     ]);
     expect(result.verification_handoff.recovery.steps).toEqual([
@@ -346,7 +392,7 @@ describe("programmatic executable runtime", () => {
     });
     expect(result.recovered).toEqual(result.completed);
     expect(result.verification_handoff).toMatchObject({
-      contract_version: "m2",
+      contract_version: "m4",
       subject_id: "issue-rollback",
       executor_provider_id: "openai-runtime",
       executor_provider_kind: ProviderKind.OpenAI,
@@ -356,8 +402,19 @@ describe("programmatic executable runtime", () => {
       evidence: {
         verification_required: true,
         independent_verifier_required: true,
+        approval_required: true,
+        approval_status: "blocked_by_recovery",
         handoff_ready: true,
         missing_artifacts: [],
+      },
+      governance: {
+        approval_gate: {
+          status: "blocked_by_recovery",
+        },
+        authorization_boundary: {
+          required_permission: "approval:grant",
+          allowed: false,
+        },
       },
       replay: {
         subject_id: "issue-rollback",
@@ -524,6 +581,8 @@ describe("programmatic executable runtime", () => {
     });
     expect(result.completed.state).not.toHaveProperty("ephemeral");
     expect(result.verification_handoff.executor_provider_kind).toBe(ProviderKind.Other);
+    expect(result.verification_handoff.evidence.approval_required).toBe(false);
+    expect(result.verification_handoff.governance.authorization_boundary.allowed).toBe(true);
   });
 
   it("completes immediately when verification is not required and no skills are requested", async () => {
@@ -599,6 +658,8 @@ describe("programmatic executable runtime", () => {
       timeline: [],
     });
     expect(result.verification_handoff.executor_provider_kind).toBe(ProviderKind.Other);
+    expect(result.verification_handoff.evidence.approval_required).toBe(false);
+    expect(result.verification_handoff.evidence.approval_status).toBe("not_required");
   });
 
   it("captures non-Error failures during runtime execution", async () => {
