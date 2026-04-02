@@ -182,9 +182,12 @@ export interface RuntimeRecoveryState {
 export interface RuntimeRecoveryScope {
   attempted_write_paths: string[];
   changed_paths: string[];
+  modified_preexisting_paths: string[];
+  created_paths: string[];
   restored_paths: string[];
   unrestored_paths: string[];
   artifact_paths_missing_after_recovery: string[];
+  residual_risk_paths: string[];
 }
 
 export interface RuntimeRecoveryStep {
@@ -315,9 +318,12 @@ export async function runExecutableRuntime(
         scope: {
           attempted_write_paths: observedRepo.getWrittenPaths(),
           changed_paths: [],
+          modified_preexisting_paths: [],
+          created_paths: [],
           restored_paths: [],
           unrestored_paths: [],
           artifact_paths_missing_after_recovery: [],
+          residual_risk_paths: [],
         },
         steps: [
           {
@@ -411,14 +417,25 @@ export async function runExecutableRuntime(
     const message = error instanceof Error ? error.message : String(error);
     const attemptedWritePaths = observedRepo.getWrittenPaths();
     let changedPaths = attemptedWritePaths;
+    let modifiedPreexistingPaths: string[] = [];
+    let createdPaths: string[] = [];
     let repoRestored = false;
     let restoredPaths: string[] = [];
     let unrestoredPaths = changedPaths;
+    let failedRepoSnapshot: unknown = null;
     let recoveredRepoSnapshot: unknown = null;
 
     if (repoSnapshot !== null && isSnapshotCapableRepoAdapter(input.repo)) {
-      const failedSnapshot = await input.repo.createSnapshot();
-      changedPaths = collectChangedRepoPaths(repoSnapshot, failedSnapshot);
+      failedRepoSnapshot = await input.repo.createSnapshot();
+      changedPaths = collectChangedRepoPaths(repoSnapshot, failedRepoSnapshot);
+      modifiedPreexistingPaths = changedPaths.filter((path) =>
+        pathExistsInSnapshot(repoSnapshot, path),
+      );
+      createdPaths = changedPaths.filter(
+        (path) =>
+          !pathExistsInSnapshot(repoSnapshot, path) &&
+          pathExistsInSnapshot(failedRepoSnapshot, path),
+      );
       await input.repo.restoreSnapshot(repoSnapshot);
       repoRestored = true;
 
@@ -437,6 +454,10 @@ export async function runExecutableRuntime(
         !pathExistsInSnapshot(repoSnapshot, path) &&
         !pathExistsInSnapshot(recoveredRepoSnapshot, path),
     );
+    const residualRiskPaths = sortUniquePaths([
+      ...unrestoredPaths,
+      ...artifactPathsMissingAfterRecovery,
+    ]);
 
     /* c8 ignore next 4 */
     const rollbackSnapshot =
@@ -476,9 +497,12 @@ export async function runExecutableRuntime(
       scope: {
         attempted_write_paths: attemptedWritePaths,
         changed_paths: changedPaths,
+        modified_preexisting_paths: modifiedPreexistingPaths,
+        created_paths: createdPaths,
         restored_paths: restoredPaths,
         unrestored_paths: unrestoredPaths,
         artifact_paths_missing_after_recovery: artifactPathsMissingAfterRecovery,
+        residual_risk_paths: residualRiskPaths,
       },
       steps: [
         {
@@ -1015,4 +1039,8 @@ function repoFileContentEquals(
 function pathExistsInSnapshot(snapshot: unknown, path: string): boolean {
   const record = coerceRepoSnapshot(snapshot);
   return path in record;
+}
+
+function sortUniquePaths(paths: string[]): string[] {
+  return [...new Set(paths)].sort();
 }

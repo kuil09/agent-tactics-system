@@ -45,7 +45,7 @@ describe("programmatic executable runtime", () => {
       inputs_summary: "Continue executable runtime slice",
       allowed_action_budget: {
         tool_calls: 8,
-        write_ops: 3,
+        write_ops: 5,
       },
       started_at: "2026-03-30T12:00:00Z",
       finished_at: "2026-03-30T12:02:00Z",
@@ -218,9 +218,12 @@ describe("programmatic executable runtime", () => {
         scope: {
           attempted_write_paths: ["artifacts/runtime.log"],
           changed_paths: [],
+          modified_preexisting_paths: [],
+          created_paths: [],
           restored_paths: [],
           unrestored_paths: [],
           artifact_paths_missing_after_recovery: [],
+          residual_risk_paths: [],
         },
       },
     });
@@ -309,6 +312,14 @@ describe("programmatic executable runtime", () => {
   it("rolls back repo state and requeues the issue when execution fails", async () => {
     const repo = new InMemoryRepoAdapter({
       "src/task.txt": "rollback runtime",
+      "artifacts/seed-state.json": JSON.stringify(
+        {
+          scenario: "failure",
+          baseline: true,
+        },
+        null,
+        2,
+      ),
     });
     const loader = new StaticSkillLoader([
       {
@@ -334,7 +345,7 @@ describe("programmatic executable runtime", () => {
       inputs_summary: "Replay rollback flow",
       allowed_action_budget: {
         tool_calls: 8,
-        write_ops: 3,
+        write_ops: 5,
       },
       started_at: "2026-03-30T12:10:00Z",
       finished_at: "2026-03-30T12:12:00Z",
@@ -393,6 +404,34 @@ describe("programmatic executable runtime", () => {
         model_id: "gpt-5.4",
         async execute(request) {
           await request.repo.write("artifacts/runtime.log", "transient execution");
+          await request.repo.write(
+            "artifacts/seed-state.json",
+            JSON.stringify(
+              {
+                status: "mutated-before-rollback",
+              },
+              null,
+              2,
+            ),
+          );
+          await request.repo.write(
+            "artifacts/partial-output.json",
+            JSON.stringify(
+              {
+                status: "partial",
+              },
+              null,
+              2,
+            ),
+          );
+          await request.repo.write(
+            "src/task.txt",
+            "rollback runtime :: provider modified input before failing\n",
+          );
+          await request.repo.write(
+            "src/generated.ts",
+            "export const generatedDuringFailure = true;\n",
+          );
           throw new Error("verification replay requested rollback");
         },
       },
@@ -494,11 +533,45 @@ describe("programmatic executable runtime", () => {
         requeued: true,
         reason: "verification replay requested rollback",
         scope: {
-          attempted_write_paths: ["artifacts/runtime.log"],
-          changed_paths: ["artifacts/runtime.log"],
-          restored_paths: ["artifacts/runtime.log"],
+          attempted_write_paths: [
+            "artifacts/runtime.log",
+            "artifacts/seed-state.json",
+            "artifacts/partial-output.json",
+            "src/task.txt",
+            "src/generated.ts",
+          ],
+          changed_paths: [
+            "artifacts/partial-output.json",
+            "artifacts/runtime.log",
+            "artifacts/seed-state.json",
+            "src/generated.ts",
+            "src/task.txt",
+          ],
+          modified_preexisting_paths: [
+            "artifacts/seed-state.json",
+            "src/task.txt",
+          ],
+          created_paths: [
+            "artifacts/partial-output.json",
+            "artifacts/runtime.log",
+            "src/generated.ts",
+          ],
+          restored_paths: [
+            "artifacts/partial-output.json",
+            "artifacts/runtime.log",
+            "artifacts/seed-state.json",
+            "src/generated.ts",
+            "src/task.txt",
+          ],
           unrestored_paths: [],
-          artifact_paths_missing_after_recovery: ["artifacts/runtime.log"],
+          artifact_paths_missing_after_recovery: [
+            "artifacts/partial-output.json",
+            "artifacts/runtime.log",
+          ],
+          residual_risk_paths: [
+            "artifacts/partial-output.json",
+            "artifacts/runtime.log",
+          ],
         },
       },
     });
@@ -521,6 +594,23 @@ describe("programmatic executable runtime", () => {
     ]);
     expect(() => repo.read("artifacts/runtime.log")).toThrow(
       "repo path not found: artifacts/runtime.log",
+    );
+    expect(() => repo.read("artifacts/partial-output.json")).toThrow(
+      "repo path not found: artifacts/partial-output.json",
+    );
+    expect(() => repo.read("src/generated.ts")).toThrow(
+      "repo path not found: src/generated.ts",
+    );
+    expect(repo.read("src/task.txt")).toBe("rollback runtime");
+    expect(repo.read("artifacts/seed-state.json")).toBe(
+      JSON.stringify(
+        {
+          scenario: "failure",
+          baseline: true,
+        },
+        null,
+        2,
+      ),
     );
   });
 
@@ -628,9 +718,12 @@ describe("programmatic executable runtime", () => {
         scope: {
           attempted_write_paths: [],
           changed_paths: [],
+          modified_preexisting_paths: [],
+          created_paths: [],
           restored_paths: [],
           unrestored_paths: [],
           artifact_paths_missing_after_recovery: [],
+          residual_risk_paths: [],
         },
       },
     });
@@ -641,9 +734,12 @@ describe("programmatic executable runtime", () => {
     expect(result.verification_handoff.recovery.scope).toEqual({
       attempted_write_paths: [],
       changed_paths: [],
+      modified_preexisting_paths: [],
+      created_paths: [],
       restored_paths: [],
       unrestored_paths: [],
       artifact_paths_missing_after_recovery: [],
+      residual_risk_paths: [],
     });
   });
 
@@ -701,18 +797,24 @@ describe("programmatic executable runtime", () => {
         scope: {
           attempted_write_paths: ["artifacts/runtime.log"],
           changed_paths: ["artifacts/runtime.log"],
+          modified_preexisting_paths: [],
+          created_paths: [],
           restored_paths: [],
           unrestored_paths: ["artifacts/runtime.log"],
           artifact_paths_missing_after_recovery: ["artifacts/runtime.log"],
+          residual_risk_paths: ["artifacts/runtime.log"],
         },
       },
     });
     expect(result.verification_handoff.recovery.scope).toEqual({
       attempted_write_paths: ["artifacts/runtime.log"],
       changed_paths: ["artifacts/runtime.log"],
+      modified_preexisting_paths: [],
+      created_paths: [],
       restored_paths: [],
       unrestored_paths: ["artifacts/runtime.log"],
       artifact_paths_missing_after_recovery: ["artifacts/runtime.log"],
+      residual_risk_paths: ["artifacts/runtime.log"],
     });
   });
 

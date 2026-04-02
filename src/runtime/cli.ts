@@ -27,10 +27,33 @@ import { runExecutableRuntime } from "./executable-runtime.js";
 import { startRuntimeFixtureProviderServer } from "./runtime-fixture-provider-server.js";
 
 export type RuntimeFixtureScenario = "success" | "failure";
+export type RuntimeFixtureProviderMode = "fixture" | "external";
+
+interface RuntimeFixtureProviderTargetBase {
+  providerId: string;
+  providerKind: ProviderKind;
+  modelId: string;
+}
+
+export interface RuntimeFixtureProviderTargetFixture extends RuntimeFixtureProviderTargetBase {
+  mode: "fixture";
+}
+
+export interface RuntimeFixtureProviderTargetExternal
+  extends RuntimeFixtureProviderTargetBase {
+  mode: "external";
+  baseUrl: string;
+  apiKey?: string;
+}
+
+export type RuntimeFixtureProviderTarget =
+  | RuntimeFixtureProviderTargetFixture
+  | RuntimeFixtureProviderTargetExternal;
 
 export interface RuntimeFixtureCliOptions {
   scenario: RuntimeFixtureScenario;
   rootDir?: string;
+  providerTarget?: RuntimeFixtureProviderTarget;
 }
 
 export interface RuntimeFixtureCliResult {
@@ -60,6 +83,10 @@ export interface RuntimeFixtureOperatorSummary {
   checks: string[];
 }
 
+export interface ParsedRuntimeFixtureCliOptions extends RuntimeFixtureCliOptions {
+  providerTarget: RuntimeFixtureProviderTarget;
+}
+
 export async function runRuntimeFixtureCli(
   options: RuntimeFixtureCliOptions,
 ): Promise<RuntimeFixtureCliResult> {
@@ -77,11 +104,23 @@ export async function runRuntimeFixtureCli(
   await seedWorkspace(repo, options.scenario);
 
   const fixture = createRuntimeFixture(options.scenario);
-  const providerServer = await startRuntimeFixtureProviderServer();
+  const providerTarget =
+    options.providerTarget ?? createDefaultRuntimeFixtureProviderTarget();
+  const providerServer =
+    providerTarget.mode === "fixture"
+      ? await startRuntimeFixtureProviderServer()
+      : null;
 
   try {
+    const providerConfig =
+      providerTarget.mode === "fixture"
+        ? {
+            ...providerTarget,
+            baseUrl: ensureFixtureProviderBaseUrl(providerServer),
+          }
+        : providerTarget;
     const provider = await connectProviderApiAdapter({
-      module: createRuntimeFixtureProviderModule(providerServer.baseUrl),
+      module: createRuntimeFixtureProviderModule(providerConfig),
       context: {
         scenario: options.scenario,
         workspace_root: workspaceDir,
@@ -118,6 +157,7 @@ export async function runRuntimeFixtureCli(
           artifact_dir: artifactDir,
           workspace_dir: workspaceDir,
           runtime_log_path: runtimeLogPath,
+          provider_target: summarizeProviderTarget(providerConfig),
           provider_handshake: provider.handshake,
           heartbeat: result.heartbeat,
           completed: result.completed,
@@ -156,7 +196,9 @@ export async function runRuntimeFixtureCli(
       providerHandshakePath,
     };
   } finally {
-    await providerServer.close();
+    if (providerServer) {
+      await providerServer.close();
+    }
   }
 }
 
@@ -175,6 +217,12 @@ export function buildSummaryVerificationHandoff(input: {
       : input.handoff.recovery.scope.artifact_paths_missing_after_recovery.map((path) =>
           join(input.workspaceDir, path),
         );
+  const residualRiskPaths =
+    input.scenario === "success"
+      ? []
+      : input.handoff.recovery.scope.residual_risk_paths.map((path) =>
+          join(input.workspaceDir, path),
+        );
 
   return {
     ...input.handoff,
@@ -183,6 +231,7 @@ export function buildSummaryVerificationHandoff(input: {
       scope: {
         ...input.handoff.recovery.scope,
         artifact_paths_missing_after_recovery: missingArtifacts,
+        residual_risk_paths: residualRiskPaths,
       },
     },
     evidence: {
@@ -288,12 +337,21 @@ export function buildVerificationEvidenceSummary(input: {
     recovery_scope: {
       attempted_write_paths: input.handoff.recovery.scope.attempted_write_paths,
       changed_paths: input.handoff.recovery.scope.changed_paths,
+      modified_preexisting_paths:
+        input.handoff.recovery.scope.modified_preexisting_paths,
+      created_paths: input.handoff.recovery.scope.created_paths,
       restored_paths: input.handoff.recovery.scope.restored_paths,
       unrestored_paths: input.handoff.recovery.scope.unrestored_paths,
       artifact_paths_missing_after_recovery:
         input.scenario === "success"
           ? []
           : input.handoff.recovery.scope.artifact_paths_missing_after_recovery.map((path) =>
+              join(input.workspaceDir, path),
+            ),
+      residual_risk_paths:
+        input.scenario === "success"
+          ? []
+          : input.handoff.recovery.scope.residual_risk_paths.map((path) =>
               join(input.workspaceDir, path),
             ),
     },
@@ -321,7 +379,7 @@ export function buildOperatorSummary(input: {
     next_action:
       input.scenario === "success"
         ? "Open run-result.json, confirm approval_workflow and input_defense, then collect the approval decision artifact and run the listed validation commands."
-        : "Open run-result.json, confirm recovery.steps and missing_artifacts, then inspect the requeued inputs before retrying.",
+        : "Open run-result.json, confirm recovery.steps, restored_paths, and residual_risk_paths, then inspect the requeued inputs before retrying.",
     key_paths: {
       artifact_dir: input.artifactDir,
       workspace_dir: input.workspaceDir,
@@ -344,6 +402,7 @@ export function buildOperatorSummary(input: {
             "heartbeat.outcome must be blocked",
             "verification_evidence.promotion_gate must be rollback_and_requeue_recorded",
             "verification_handoff.recovery.steps must show repo_restore, state_rollback, and issue_requeue as completed",
+            "verification_evidence.recovery_scope must separate modified_preexisting_paths, created_paths, restored_paths, and residual_risk_paths",
           ],
   };
 }
@@ -387,7 +446,7 @@ function createRuntimeFixture(
         : "Replay the shared runtime rollback path with approval evidence preserved",
     allowed_action_budget: {
       tool_calls: 8,
-      write_ops: 3,
+      write_ops: scenario === "success" ? 1 : 5,
     },
     started_at: "2026-03-31T00:00:00Z",
     finished_at: "2026-03-31T00:02:00Z",
@@ -469,12 +528,17 @@ function createRuntimeFixture(
   };
 }
 
-function createRuntimeFixtureProviderModule(baseUrl: string): ProviderApiModule {
+function createRuntimeFixtureProviderModule(
+  config:
+    | (RuntimeFixtureProviderTargetFixture & { baseUrl: string })
+    | RuntimeFixtureProviderTargetExternal,
+): ProviderApiModule {
   return createOpenAICompatibleProviderModule({
-    providerId: "openai-runtime",
-    providerKind: ProviderKind.OpenAI,
-    modelId: "gpt-5.4",
-    baseUrl,
+    providerId: config.providerId,
+    providerKind: config.providerKind,
+    modelId: config.modelId,
+    baseUrl: config.baseUrl,
+    apiKey: config.mode === "external" ? config.apiKey : undefined,
   });
 }
 
@@ -486,12 +550,23 @@ async function seedWorkspace(
     "src/task.txt",
     scenario === "success" ? "wire runtime" : "rollback runtime",
   );
+  await repo.write(
+    "artifacts/seed-state.json",
+    JSON.stringify(
+      {
+        scenario,
+        baseline: true,
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 /* c8 ignore start */
 async function main(): Promise<void> {
-  const scenario = parseScenario(process.argv.slice(2));
-  const result = await runRuntimeFixtureCli({ scenario });
+  const options = parseRuntimeFixtureCliOptions(process.argv.slice(2), process.env);
+  const result = await runRuntimeFixtureCli(options);
   const summary = JSON.parse(await readFile(result.summaryPath, "utf8")) as {
     operator_summary: RuntimeFixtureOperatorSummary;
   };
@@ -536,6 +611,137 @@ export function coerceScenario(value: string | undefined): RuntimeFixtureScenari
   }
 
   throw new Error("scenario must be one of: success, failure");
+}
+
+export function parseRuntimeFixtureCliOptions(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): ParsedRuntimeFixtureCliOptions {
+  return {
+    scenario: parseScenario(args),
+    providerTarget: parseRuntimeFixtureProviderTarget(args, env),
+  };
+}
+
+export function parseRuntimeFixtureProviderTarget(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): RuntimeFixtureProviderTarget {
+  const mode = coerceProviderMode(
+    readRuntimeFixtureOption(args, "--provider-mode") ?? env.RUNTIME_FIXTURE_PROVIDER_MODE,
+  );
+
+  if (mode === "fixture") {
+    return createDefaultRuntimeFixtureProviderTarget();
+  }
+
+  const baseUrl =
+    readRuntimeFixtureOption(args, "--provider-base-url") ??
+    env.RUNTIME_FIXTURE_PROVIDER_BASE_URL;
+  const modelId =
+    readRuntimeFixtureOption(args, "--provider-model") ??
+    env.RUNTIME_FIXTURE_PROVIDER_MODEL_ID;
+
+  if (!baseUrl) {
+    throw new Error(
+      "external provider mode requires --provider-base-url or RUNTIME_FIXTURE_PROVIDER_BASE_URL",
+    );
+  }
+
+  if (!modelId) {
+    throw new Error(
+      "external provider mode requires --provider-model or RUNTIME_FIXTURE_PROVIDER_MODEL_ID",
+    );
+  }
+
+  return {
+    mode,
+    providerId:
+      readRuntimeFixtureOption(args, "--provider-id") ??
+      env.RUNTIME_FIXTURE_PROVIDER_ID ??
+      "openai-runtime",
+    providerKind: coerceProviderKind(
+      readRuntimeFixtureOption(args, "--provider-kind") ??
+        env.RUNTIME_FIXTURE_PROVIDER_KIND ??
+        ProviderKind.OpenAI,
+    ),
+    modelId,
+    baseUrl,
+    apiKey:
+      readRuntimeFixtureOption(args, "--provider-api-key") ??
+      env.RUNTIME_FIXTURE_PROVIDER_API_KEY,
+  };
+}
+
+export function coerceProviderMode(
+  value: string | undefined,
+): RuntimeFixtureProviderMode {
+  if (!value || value === "fixture") {
+    return "fixture";
+  }
+
+  if (value === "external") {
+    return value;
+  }
+
+  throw new Error("provider mode must be one of: fixture, external");
+}
+
+export function coerceProviderKind(value: string | undefined): ProviderKind {
+  if (value && Object.values(ProviderKind).includes(value as ProviderKind)) {
+    return value as ProviderKind;
+  }
+
+  throw new Error(
+    "provider kind must be one of: openai, claude, opencode, cursor, local_openai_compatible, other",
+  );
+}
+
+function createDefaultRuntimeFixtureProviderTarget(): RuntimeFixtureProviderTargetFixture {
+  return {
+    mode: "fixture",
+    providerId: "openai-runtime",
+    providerKind: ProviderKind.OpenAI,
+    modelId: "gpt-5.4",
+  };
+}
+
+function summarizeProviderTarget(
+  providerTarget:
+    | (RuntimeFixtureProviderTargetFixture & { baseUrl: string })
+    | RuntimeFixtureProviderTargetExternal,
+) {
+  return {
+    mode: providerTarget.mode,
+    provider_id: providerTarget.providerId,
+    provider_kind: providerTarget.providerKind,
+    model_id: providerTarget.modelId,
+    base_url: providerTarget.baseUrl,
+  };
+}
+
+function readRuntimeFixtureOption(
+  args: string[],
+  flag: `--${string}`,
+): string | undefined {
+  const inline = args.find((arg) => arg.startsWith(`${flag}=`));
+
+  if (inline) {
+    return inline.slice(flag.length + 1);
+  }
+
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] : undefined;
+}
+
+function ensureFixtureProviderBaseUrl(
+  providerServer: Awaited<ReturnType<typeof startRuntimeFixtureProviderServer>> | null,
+): string {
+  if (!providerServer) {
+    throw new Error("fixture provider server was not started");
+  }
+
+  return providerServer.baseUrl;
 }
 /* c8 ignore start */
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;

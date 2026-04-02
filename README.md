@@ -17,9 +17,11 @@ tests around those boundaries.
 - Adapter-facing provider execution, repository I/O, and skill loading modules
 - Turn queue, canonical state store, and promotion flow in `src/orchestrator`
 - Programmatic and CLI-accessible executable runtime entrypoints in `src/runtime`
+- Minimal control-plane issue coordination service in `src/control-plane`
 - Independent verification planning and replay helpers in `src/verifier`
 - Vitest coverage for schemas, policies, orchestrator behavior, providers, and
-  verification flows, including executable runtime wiring and fixture replay
+  verification flows, including executable runtime wiring, fixture replay, and
+  issue lifecycle product-surface checks
 
 ## v1 Rules
 
@@ -40,6 +42,7 @@ schemas/
   *.schema.json
 src/
   adapters/
+  control-plane/
   contracts/
   orchestrator/
   policies/
@@ -49,6 +52,7 @@ src/
   verifier/
 tests/
   adapters/
+  control-plane/
   contracts/
   orchestrator/
   policies/
@@ -56,6 +60,15 @@ tests/
   runtime/
   verifier/
 ```
+
+Additional product-surface notes:
+
+- `docs/control-plane-issue-surface.md` documents the first minimal
+  control-plane issue service that sits beside the runtime fixture
+- `src/control-plane/issue-service.ts` covers lifecycle transitions, checkout
+  acquisition, checkout release, and incremental comment reads
+- `tests/control-plane/issue-service.test.ts` fixes the baseline service
+  contract for lifecycle, lock-conflict, release, and comment-trail behavior
 
 ## Shared Runtime Entry Surface
 
@@ -65,6 +78,27 @@ Run the shared fixture entrypoint from the repository root:
 npm run runtime:fixture
 npm run runtime:fixture -- --scenario=failure
 ```
+
+The same CLI now supports an operator-supplied OpenAI-compatible endpoint while
+preserving the shared artifact contract:
+
+```bash
+RUNTIME_FIXTURE_PROVIDER_MODE=external \
+RUNTIME_FIXTURE_PROVIDER_BASE_URL=https://provider.example.com \
+RUNTIME_FIXTURE_PROVIDER_MODEL_ID=gpt-4.1-mini \
+RUNTIME_FIXTURE_PROVIDER_API_KEY=redacted \
+npm run runtime:fixture
+```
+
+Optional overrides:
+
+- `--provider-id=<id>` to change the recorded provider identifier
+- `--provider-kind=<openai|claude|opencode|cursor|local_openai_compatible|other>`
+- `--provider-api-key=<key>` for non-production local smoke runs when env vars
+  are inconvenient
+
+The governed credential source and pass/fail checks for external-provider smoke
+runs are fixed in [`docs/external-provider-smoke-run.md`](docs/external-provider-smoke-run.md).
 
 What the CLI now fixes as the M2 verification seam:
 
@@ -131,6 +165,10 @@ Failure path:
   `rollback_and_requeue_recorded`
 - `run-result.json#verification_handoff.recovery.steps` records `repo_restore`,
   `state_rollback`, and `issue_requeue`
+- `verification_evidence.recovery_scope` separates
+  `modified_preexisting_paths`, `created_paths`, `restored_paths`, and
+  `residual_risk_paths` so operators can distinguish restored repo files from
+  transient outputs that intentionally disappear after rollback
 - `verification_handoff.evidence.missing_artifacts` tells the operator which
   expected artifacts were not preserved after rollback
 
@@ -165,6 +203,7 @@ external-input defense visible in one reproducible runtime artifact.
 ## Verification
 
 ```bash
+npm test -- --run tests/control-plane/issue-service.test.ts
 npm run runtime:fixture
 npm run runtime:fixture -- --scenario=failure
 npm run typecheck
@@ -205,10 +244,9 @@ Runtime entrypoints:
 
 ## Next Milestone
 
-1. Extend the handshake-backed provider path from the fixture transport to a
-   credentialed external provider while preserving the shared M2 artifact
-   contract.
-2. Extend recovery coverage to multi-file repo mutations and provider-side
-   partial writes.
+1. Validate the external-provider CLI path against a governed credential source
+   and promote it from operator smoke coverage to a reviewed production handoff.
+2. Carry rollback residual-risk reporting into the control-plane approval and
+   rerun surfaces so operators do not have to inspect raw fixture JSON.
 3. Connect the approval workflow handoff to a real control-plane approval
    surface once that integration is in scope.

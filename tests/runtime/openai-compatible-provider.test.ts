@@ -96,6 +96,14 @@ describe("openai-compatible runtime provider", () => {
     });
     const repo = new InMemoryRepoAdapter({
       "src/task.txt": "rollback runtime",
+      "artifacts/seed-state.json": JSON.stringify(
+        {
+          scenario: "failure",
+          baseline: true,
+        },
+        null,
+        2,
+      ),
     });
 
     await expect(
@@ -130,8 +138,17 @@ describe("openai-compatible runtime provider", () => {
     expect(await repo.read("artifacts/partial-output.json")).toContain(
       "\"protocol\": \"provider-module-v1\"",
     );
+    expect(await repo.read("artifacts/partial-output.json")).toContain(
+      "\"mutated_paths\": [",
+    );
+    expect(await repo.read("artifacts/seed-state.json")).toContain(
+      "\"status\": \"mutated-before-rollback\"",
+    );
     expect(await repo.read("src/generated.ts")).toBe(
       "export const generatedDuringFailure = true;\n",
+    );
+    expect(await repo.read("src/task.txt")).toBe(
+      "rollback runtime :: provider modified input before failing\n",
     );
   });
 

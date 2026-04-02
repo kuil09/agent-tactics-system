@@ -1,4 +1,5 @@
-import { readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -8,14 +9,18 @@ import {
   buildSummaryVerificationHandoff,
   buildVerificationEvidenceSummary,
   coerceScenario,
+  coerceProviderKind,
+  coerceProviderMode,
   parseScenario,
+  parseRuntimeFixtureCliOptions,
   runRuntimeFixtureCli,
 } from "../../src/runtime/cli.js";
 import { HeartbeatOutcome, ProviderKind, VerificationStatus } from "../../src/contracts/enums.js";
+import { startRuntimeFixtureProviderServer } from "../../src/runtime/runtime-fixture-provider-server.js";
 
 describe("runtime fixture cli", () => {
   it("writes shared success artifacts", async () => {
-    const rootDir = join(process.cwd(), ".tmp-runtime-cli-success");
+    const rootDir = await mkdtemp(join(tmpdir(), "runtime-cli-success-"));
 
     try {
       const result = await runRuntimeFixtureCli({
@@ -127,7 +132,7 @@ describe("runtime fixture cli", () => {
   });
 
   it("captures rollback evidence for the failure path", async () => {
-    const rootDir = join(process.cwd(), ".tmp-runtime-cli-failure");
+    const rootDir = await mkdtemp(join(tmpdir(), "runtime-cli-failure-"));
 
     try {
       const result = await runRuntimeFixtureCli({
@@ -144,6 +149,21 @@ describe("runtime fixture cli", () => {
       await expect(
         readFile(join(result.workspaceDir, "src", "generated.ts"), "utf8"),
       ).rejects.toThrow();
+      await expect(readFile(join(result.workspaceDir, "src", "task.txt"), "utf8")).resolves.toBe(
+        "rollback runtime",
+      );
+      await expect(
+        readFile(join(result.workspaceDir, "artifacts", "seed-state.json"), "utf8"),
+      ).resolves.toBe(
+        JSON.stringify(
+          {
+            scenario: "failure",
+            baseline: true,
+          },
+          null,
+          2,
+        ),
+      );
 
       const summary = JSON.parse(await readFile(result.summaryPath, "utf8")) as {
         outcome: string;
@@ -169,8 +189,11 @@ describe("runtime fixture cli", () => {
             outcome_classification: string;
             scope: {
               changed_paths: string[];
+              modified_preexisting_paths: string[];
+              created_paths: string[];
               restored_paths: string[];
               artifact_paths_missing_after_recovery: string[];
+              residual_risk_paths: string[];
             };
           };
         };
@@ -181,8 +204,11 @@ describe("runtime fixture cli", () => {
           missing_artifacts: string[];
           recovery_scope: {
             changed_paths: string[];
+            modified_preexisting_paths: string[];
+            created_paths: string[];
             restored_paths: string[];
             artifact_paths_missing_after_recovery: string[];
+            residual_risk_paths: string[];
           };
         };
       };
@@ -200,14 +226,31 @@ describe("runtime fixture cli", () => {
           changed_paths: [
             "artifacts/partial-output.json",
             "artifacts/runtime.log",
+            "artifacts/seed-state.json",
+            "src/generated.ts",
+            "src/task.txt",
+          ],
+          modified_preexisting_paths: [
+            "artifacts/seed-state.json",
+            "src/task.txt",
+          ],
+          created_paths: [
+            "artifacts/partial-output.json",
+            "artifacts/runtime.log",
             "src/generated.ts",
           ],
           restored_paths: [
             "artifacts/partial-output.json",
             "artifacts/runtime.log",
+            "artifacts/seed-state.json",
             "src/generated.ts",
+            "src/task.txt",
           ],
           artifact_paths_missing_after_recovery: [
+            result.workspaceDir + "/artifacts/partial-output.json",
+            result.runtimeLogPath,
+          ],
+          residual_risk_paths: [
             result.workspaceDir + "/artifacts/partial-output.json",
             result.runtimeLogPath,
           ],
@@ -229,14 +272,31 @@ describe("runtime fixture cli", () => {
           changed_paths: [
             "artifacts/partial-output.json",
             "artifacts/runtime.log",
+            "artifacts/seed-state.json",
+            "src/generated.ts",
+            "src/task.txt",
+          ],
+          modified_preexisting_paths: [
+            "artifacts/seed-state.json",
+            "src/task.txt",
+          ],
+          created_paths: [
+            "artifacts/partial-output.json",
+            "artifacts/runtime.log",
             "src/generated.ts",
           ],
           restored_paths: [
             "artifacts/partial-output.json",
             "artifacts/runtime.log",
+            "artifacts/seed-state.json",
             "src/generated.ts",
+            "src/task.txt",
           ],
           artifact_paths_missing_after_recovery: [
+            result.workspaceDir + "/artifacts/partial-output.json",
+            result.runtimeLogPath,
+          ],
+          residual_risk_paths: [
             result.workspaceDir + "/artifacts/partial-output.json",
             result.runtimeLogPath,
           ],
@@ -252,6 +312,9 @@ describe("runtime fixture cli", () => {
       expect(summary.operator_summary.checks).toContain(
         "heartbeat.outcome must be blocked",
       );
+      expect(summary.operator_summary.checks).toContain(
+        "verification_evidence.recovery_scope must separate modified_preexisting_paths, created_paths, restored_paths, and residual_risk_paths",
+      );
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }
@@ -264,12 +327,80 @@ describe("runtime fixture cli", () => {
     expect(coerceScenario("failure")).toBe("failure");
   });
 
+  it("defaults to the fixture provider target", () => {
+    expect(parseRuntimeFixtureCliOptions([], {})).toMatchObject({
+      scenario: "success",
+      providerTarget: {
+        mode: "fixture",
+        providerId: "openai-runtime",
+        providerKind: ProviderKind.OpenAI,
+        modelId: "gpt-5.4",
+      },
+    });
+    expect(coerceProviderMode(undefined)).toBe("fixture");
+  });
+
+  it("parses an external provider target from flags and env", () => {
+    expect(
+      parseRuntimeFixtureCliOptions(
+        [
+          "--scenario=failure",
+          "--provider-mode=external",
+          "--provider-base-url",
+          "https://provider.test",
+          "--provider-model",
+          "gpt-4.1-mini",
+          "--provider-id",
+          "runtime-smoke",
+        ],
+        {
+          RUNTIME_FIXTURE_PROVIDER_KIND: ProviderKind.LocalOpenAICompatible,
+          RUNTIME_FIXTURE_PROVIDER_API_KEY: "secret-key",
+        },
+      ),
+    ).toMatchObject({
+      scenario: "failure",
+      providerTarget: {
+        mode: "external",
+        providerId: "runtime-smoke",
+        providerKind: ProviderKind.LocalOpenAICompatible,
+        modelId: "gpt-4.1-mini",
+        baseUrl: "https://provider.test",
+        apiKey: "secret-key",
+      },
+    });
+    expect(coerceProviderMode("external")).toBe("external");
+    expect(coerceProviderKind("claude")).toBe(ProviderKind.Claude);
+  });
+
   it("rejects unknown scenarios", () => {
     expect(() => parseScenario(["--scenario=unknown"])).toThrow(
       "scenario must be one of: success, failure",
     );
     expect(() => coerceScenario(undefined)).toThrow(
       "scenario must be one of: success, failure",
+    );
+  });
+
+  it("rejects invalid provider settings", () => {
+    expect(() => coerceProviderMode("bad")).toThrow(
+      "provider mode must be one of: fixture, external",
+    );
+    expect(() => coerceProviderKind("bad")).toThrow(
+      "provider kind must be one of: openai, claude, opencode, cursor, local_openai_compatible, other",
+    );
+    expect(() =>
+      parseRuntimeFixtureCliOptions(["--provider-mode=external"], {}),
+    ).toThrow(
+      "external provider mode requires --provider-base-url or RUNTIME_FIXTURE_PROVIDER_BASE_URL",
+    );
+    expect(() =>
+      parseRuntimeFixtureCliOptions(
+        ["--provider-mode=external", "--provider-base-url=https://provider.test"],
+        {},
+      ),
+    ).toThrow(
+      "external provider mode requires --provider-model or RUNTIME_FIXTURE_PROVIDER_MODEL_ID",
     );
   });
 
@@ -382,9 +513,12 @@ describe("runtime fixture cli", () => {
         scope: {
           attempted_write_paths: [],
           changed_paths: [],
+          modified_preexisting_paths: [],
+          created_paths: [],
           restored_paths: [],
           unrestored_paths: [],
           artifact_paths_missing_after_recovery: [],
+          residual_risk_paths: [],
         },
         steps: [],
       },
@@ -440,6 +574,63 @@ describe("runtime fixture cli", () => {
         provider_handshake_path: "/tmp/run-result.json#provider_handshake",
       },
     });
+  });
+
+  it("preserves the shared artifact contract when using an external provider target", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "runtime-cli-external-"));
+    const server = await startRuntimeFixtureProviderServer();
+
+    try {
+      const result = await runRuntimeFixtureCli({
+        scenario: "success",
+        rootDir,
+        providerTarget: {
+          mode: "external",
+          providerId: "runtime-smoke",
+          providerKind: ProviderKind.OpenAI,
+          modelId: "gpt-5.4",
+          baseUrl: server.baseUrl,
+        },
+      });
+
+      const summary = JSON.parse(await readFile(result.summaryPath, "utf8")) as {
+        provider_target: {
+          mode: string;
+          provider_id: string;
+          provider_kind: string;
+          model_id: string;
+          base_url: string;
+        };
+        provider_handshake: {
+          provider_id: string;
+          provider_kind: string;
+          model_id: string;
+          protocol_version: string;
+          metadata: { endpoint_origin: string; transport: string };
+        };
+      };
+
+      expect(summary.provider_target).toEqual({
+        mode: "external",
+        provider_id: "runtime-smoke",
+        provider_kind: ProviderKind.OpenAI,
+        model_id: "gpt-5.4",
+        base_url: server.baseUrl,
+      });
+      expect(summary.provider_handshake).toMatchObject({
+        provider_id: "runtime-smoke",
+        provider_kind: ProviderKind.OpenAI,
+        model_id: "gpt-5.4",
+        protocol_version: "provider-module-v1",
+        metadata: {
+          endpoint_origin: server.baseUrl,
+          transport: "http",
+        },
+      });
+    } finally {
+      await server.close();
+      await rm(rootDir, { recursive: true, force: true });
+    }
   });
 
   it("distinguishes approval-only and verifier-only promotion gates", () => {
@@ -541,9 +732,12 @@ describe("runtime fixture cli", () => {
           scope: {
             attempted_write_paths: [],
             changed_paths: [],
+            modified_preexisting_paths: [],
+            created_paths: [],
             restored_paths: [],
             unrestored_paths: [],
             artifact_paths_missing_after_recovery: [],
+            residual_risk_paths: [],
           },
           steps: [],
         },
@@ -648,9 +842,12 @@ describe("runtime fixture cli", () => {
           scope: {
             attempted_write_paths: [],
             changed_paths: [],
+            modified_preexisting_paths: [],
+            created_paths: [],
             restored_paths: [],
             unrestored_paths: [],
             artifact_paths_missing_after_recovery: [],
+            residual_risk_paths: [],
           },
           steps: [],
         },

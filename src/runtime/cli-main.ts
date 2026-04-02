@@ -1,14 +1,14 @@
 import { readFile } from "node:fs/promises";
 
 import {
-  parseScenario,
+  parseRuntimeFixtureCliOptions,
   runRuntimeFixtureCli,
   type RuntimeFixtureOperatorSummary,
 } from "./cli.js";
 
 async function main(): Promise<void> {
-  const scenario = parseScenario(process.argv.slice(2));
-  const result = await runRuntimeFixtureCli({ scenario });
+  const options = parseRuntimeFixtureCliOptions(process.argv.slice(2), process.env);
+  const result = await runRuntimeFixtureCli(options);
   const summary = JSON.parse(await readFile(result.summaryPath, "utf8")) as {
     operator_summary: RuntimeFixtureOperatorSummary;
   };
