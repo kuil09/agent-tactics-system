@@ -80,8 +80,10 @@ What the CLI now fixes as the M2 verification seam:
 
 The fixture is intentionally narrow. It proves the shared execution seam and the
 extended M4 artifact contract for verification evidence, rollback handling, and
-a minimum approval gate, without claiming production provider integration or a
-fully embedded human approval workflow.
+a minimum approval gate, while now exercising a real OpenAI-compatible HTTP
+provider handshake against the fixture transport instead of an inline provider
+stub. It still does not claim production provider credentials or a fully
+embedded human approval workflow.
 
 ## M3 Single Operational Flow
 
@@ -100,7 +102,7 @@ Use the flow like this:
 3. Read `operator_summary.decision`, `operator_summary.next_action`, and
    `verification_evidence.promotion_gate`.
 4. Inspect the paths in `operator_summary.key_paths`.
-5. Confirm `verification_handoff.governance.approval_gate`,
+5. Confirm `verification_handoff.approval_workflow`,
    `verification_handoff.governance.authorization_boundary`, and
    `verification_handoff.governance.input_defense`.
 6. Run the validation commands listed in
@@ -109,9 +111,10 @@ Use the flow like this:
 Success path:
 
 - `heartbeat.outcome` is `patched`
+- `provider_handshake.metadata.transport` is `http`
 - `verification_evidence.promotion_gate` is
   `waiting_for_human_approval_and_independent_verifier`
-- `verification_handoff.governance.approval_gate.status` is
+- `verification_handoff.approval_workflow.status` is
   `pending_human_approval`
 - `verification_handoff.governance.authorization_boundary.exception` records
   the permission error that keeps promotion closed without approval
@@ -136,24 +139,28 @@ runtime through a heartbeat record, state transitions are written into the
 summary snapshot, verification handoff is recorded in the same artifact, and
 success or rollback leaves a reproducible next-action summary for the operator.
 
-## M4 Minimum Approval Gate
+## M5 Approval Workflow Handoff
 
-The same fixture now demonstrates one approval-gated promotion path for the v1
-reference implementation:
+The same fixture now demonstrates one approval-gated promotion handoff path for
+the v1 reference implementation:
 
 - Success runs stop at `done_candidate` and record a human approval gate before
   promotion to `complete`
-- `run-result.json#verification_handoff.governance.approval_gate` is the audit
-  trail for the approval requirement and expected approval artifact path
+- `run-result.json#verification_handoff.approval_workflow.request` records the
+  approval request handoff, required evidence, and validation commands
+- `run-result.json#verification_handoff.approval_workflow.decision` is the
+  approval decision artifact path that must be satisfied before promotion
+- `run-result.json#verification_handoff.approval_workflow.release` records the
+  blockers and unblock checklist for promotion
 - `run-result.json#verification_handoff.governance.authorization_boundary`
   records the permission exception raised when promotion is attempted without
   `approval:grant`
 - `run-result.json#verification_handoff.governance.input_defense` shows which
   inputs are trusted workspace data versus untrusted external data
 
-This is intentionally a minimum gate, not a full approval product surface. The
-goal is to make promotion control, authorization failure, and external-input
-defense visible in one reproducible runtime artifact.
+This is still not a full control-plane approval product surface. The goal is to
+make approval request, approval decision, promotion release criteria, and
+external-input defense visible in one reproducible runtime artifact.
 
 ## Verification
 
@@ -198,9 +205,10 @@ Runtime entrypoints:
 
 ## Next Milestone
 
-1. Replace the fixture provider with a real adapter handshake while preserving
-   the shared M2 artifact contract.
+1. Extend the handshake-backed provider path from the fixture transport to a
+   credentialed external provider while preserving the shared M2 artifact
+   contract.
 2. Extend recovery coverage to multi-file repo mutations and provider-side
    partial writes.
-3. Replace the minimum approval artifact with a first-class approval workflow
-   handoff once a real control-plane integration is in scope.
+3. Connect the approval workflow handoff to a real control-plane approval
+   surface once that integration is in scope.
