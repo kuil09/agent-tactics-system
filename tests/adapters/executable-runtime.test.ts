@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ProviderKind,
   SideEffectLevel,
   TaskInputKind,
   TaskLevel,
 } from "../../src/contracts/enums.js";
 import type { TaskEnvelope } from "../../src/contracts/types.js";
 import {
+  connectProviderApiAdapter,
   executeTaskEnvelope,
+  type ProviderApiModule,
   type ProviderExecutionRequest,
 } from "../../src/adapters/provider-api/index.js";
 import {
@@ -238,5 +241,100 @@ describe("executable runtime slice", () => {
       }),
       source: "static",
     });
+  });
+
+  it("connects execution through a provider handshake before running the adapter", async () => {
+    const repo = new InMemoryRepoAdapter({
+      "src/task.txt": "execute handshake-backed runtime",
+    });
+    const envelope: TaskEnvelope = {
+      objective: "Run the handshake-backed adapter",
+      task_level: TaskLevel.L2,
+      inputs: [
+        {
+          kind: TaskInputKind.File,
+          ref: "src/task.txt",
+        },
+      ],
+      allowed_tools: ["node"],
+      write_scope: ["src", "artifacts"],
+      must_not: [],
+      done_when: ["runtime writes the execution log"],
+      stop_conditions: [],
+      output_schema_ref: "schemas/verification-record.schema.json",
+      verification_required: false,
+      rollback_hint: "remove runtime log",
+    };
+
+    const providerModule: ProviderApiModule = {
+      handshake(context) {
+        expect(context).toEqual({
+          scenario: "success",
+          workspace_root: "/tmp/runtime-workspace",
+        });
+
+        return {
+          provider_id: "handshake-provider",
+          provider_kind: ProviderKind.OpenAI,
+          model_id: "handshake-model",
+          protocol_version: "provider-module-v1",
+          summary: "connected handshake-backed provider",
+        };
+      },
+      async execute(request) {
+        await request.repo.write("artifacts/handshake.txt", request.handshake.summary);
+
+        return {
+          provider_id: request.handshake.provider_id,
+          model_id: request.handshake.model_id,
+          summary: `used ${request.handshake.protocol_version}`,
+        };
+      },
+    };
+
+    const provider = await connectProviderApiAdapter({
+      module: providerModule,
+      context: {
+        scenario: "success",
+        workspace_root: "/tmp/runtime-workspace",
+      },
+    });
+
+    expect(provider.handshake.summary).toBe("connected handshake-backed provider");
+
+    const executed = await executeTaskEnvelope({
+      envelope,
+      provider,
+      repo,
+      skill_loader: new StaticSkillLoader([]),
+    });
+
+    expect(await repo.read("artifacts/handshake.txt")).toBe(
+      "connected handshake-backed provider",
+    );
+    expect(executed.result.summary).toBe("used provider-module-v1");
+  });
+
+  it("rejects incomplete provider handshakes", async () => {
+    await expect(
+      connectProviderApiAdapter({
+        module: {
+          handshake() {
+            return {
+              provider_id: "",
+              provider_kind: ProviderKind.Other,
+              model_id: "model-only",
+              protocol_version: "",
+              summary: "invalid handshake",
+            };
+          },
+          execute() {
+            throw new Error("execute should not run when the handshake is invalid");
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      "provider handshake must include provider_id, model_id, and protocol_version",
+    );
   });
 });

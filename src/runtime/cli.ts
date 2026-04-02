@@ -16,9 +16,15 @@ import type {
   TaskEnvelope,
   VerificationRecord,
 } from "../contracts/types.js";
+import {
+  connectProviderApiAdapter,
+  type ProviderApiModule,
+} from "../adapters/provider-api/index.js";
 import { FileSystemRepoAdapter } from "../adapters/repo/index.js";
 import { StaticSkillLoader } from "../skills/loader.js";
+import { createOpenAICompatibleProviderModule } from "./openai-compatible-provider.js";
 import { runExecutableRuntime } from "./executable-runtime.js";
+import { startRuntimeFixtureProviderServer } from "./runtime-fixture-provider-server.js";
 
 export type RuntimeFixtureScenario = "success" | "failure";
 
@@ -34,6 +40,7 @@ export interface RuntimeFixtureCliResult {
   workspaceDir: string;
   summaryPath: string;
   runtimeLogPath: string;
+  providerHandshakePath: string;
 }
 
 export interface RuntimeFixtureOperatorSummary {
@@ -48,6 +55,7 @@ export interface RuntimeFixtureOperatorSummary {
     summary_path: string;
     runtime_log_path: string;
     governance_path: string;
+    provider_handshake_path: string;
   };
   checks: string[];
 }
@@ -60,6 +68,7 @@ export async function runRuntimeFixtureCli(
   const workspaceDir = join(artifactDir, "workspace");
   const summaryPath = join(artifactDir, "run-result.json");
   const runtimeLogPath = join(workspaceDir, "artifacts", "runtime.log");
+  const providerHandshakePath = `${summaryPath}#provider_handshake`;
 
   await rm(artifactDir, { recursive: true, force: true });
   await mkdir(workspaceDir, { recursive: true });
@@ -68,70 +77,87 @@ export async function runRuntimeFixtureCli(
   await seedWorkspace(repo, options.scenario);
 
   const fixture = createRuntimeFixture(options.scenario);
-  const result = await runExecutableRuntime({
-    heartbeat: fixture.heartbeat,
-    envelope: fixture.envelope,
-    provider: fixture.provider,
-    repo,
-    skill_loader: fixture.skillLoader,
-    required_skill_ids: fixture.requiredSkillIds,
-    verification_records: fixture.verificationRecords,
-  });
+  const providerServer = await startRuntimeFixtureProviderServer();
 
-  await mkdir(dirname(summaryPath), { recursive: true });
-  const operatorSummary = buildOperatorSummary({
-    scenario: options.scenario,
-    artifactDir,
-    workspaceDir,
-    summaryPath,
-    runtimeLogPath,
-    handoff: result.verification_handoff,
-  });
-  await writeFile(
-    summaryPath,
-    `${JSON.stringify(
-      {
+  try {
+    const provider = await connectProviderApiAdapter({
+      module: createRuntimeFixtureProviderModule(providerServer.baseUrl),
+      context: {
         scenario: options.scenario,
-        outcome:
-          result.heartbeat.outcome === HeartbeatOutcome.Patched ? "patched" : "blocked",
+        workspace_root: workspaceDir,
         artifact_dir: artifactDir,
-        workspace_dir: workspaceDir,
-        runtime_log_path: runtimeLogPath,
-        heartbeat: result.heartbeat,
-        completed: result.completed,
-        verification_handoff: buildSummaryVerificationHandoff({
-          scenario: options.scenario,
-          artifactDir,
-          workspaceDir,
-          summaryPath,
-          runtimeLogPath,
-          handoff: result.verification_handoff,
-        }),
-        verification_evidence: buildVerificationEvidenceSummary({
-          scenario: options.scenario,
-          artifactDir,
-          workspaceDir,
-          summaryPath,
-          runtimeLogPath,
-          handoff: result.verification_handoff,
-        }),
-        operator_summary: operatorSummary,
-        recovered: result.recovered ?? null,
       },
-      null,
-      2,
-    )}\n`,
-    "utf8",
-  );
+    });
+    const result = await runExecutableRuntime({
+      heartbeat: fixture.heartbeat,
+      envelope: fixture.envelope,
+      provider,
+      repo,
+      skill_loader: fixture.skillLoader,
+      required_skill_ids: fixture.requiredSkillIds,
+      verification_records: fixture.verificationRecords,
+    });
 
-  return {
-    scenario: options.scenario,
-    outcome: result.heartbeat.outcome === HeartbeatOutcome.Patched ? "patched" : "blocked",
-    artifactDir,
-    workspaceDir,
-    summaryPath,
-    runtimeLogPath,
-  };
+    await mkdir(dirname(summaryPath), { recursive: true });
+    const operatorSummary = buildOperatorSummary({
+      scenario: options.scenario,
+      artifactDir,
+      workspaceDir,
+      summaryPath,
+      runtimeLogPath,
+      providerHandshakePath,
+      handoff: result.verification_handoff,
+    });
+    await writeFile(
+      summaryPath,
+      `${JSON.stringify(
+        {
+          scenario: options.scenario,
+          outcome:
+            result.heartbeat.outcome === HeartbeatOutcome.Patched ? "patched" : "blocked",
+          artifact_dir: artifactDir,
+          workspace_dir: workspaceDir,
+          runtime_log_path: runtimeLogPath,
+          provider_handshake: provider.handshake,
+          heartbeat: result.heartbeat,
+          completed: result.completed,
+          verification_handoff: buildSummaryVerificationHandoff({
+            scenario: options.scenario,
+            artifactDir,
+            workspaceDir,
+            summaryPath,
+            runtimeLogPath,
+            handoff: result.verification_handoff,
+          }),
+          verification_evidence: buildVerificationEvidenceSummary({
+            scenario: options.scenario,
+            artifactDir,
+            workspaceDir,
+            summaryPath,
+            runtimeLogPath,
+            handoff: result.verification_handoff,
+          }),
+          operator_summary: operatorSummary,
+          recovered: result.recovered ?? null,
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    return {
+      scenario: options.scenario,
+      outcome: result.heartbeat.outcome === HeartbeatOutcome.Patched ? "patched" : "blocked",
+      artifactDir,
+      workspaceDir,
+      summaryPath,
+      runtimeLogPath,
+      providerHandshakePath,
+    };
+  } finally {
+    await providerServer.close();
+  }
 }
 
 export function buildSummaryVerificationHandoff(input: {
@@ -143,9 +169,22 @@ export function buildSummaryVerificationHandoff(input: {
   handoff: Awaited<ReturnType<typeof runExecutableRuntime>>["verification_handoff"];
 }) {
   const runtimeLogStatus = input.scenario === "success" ? "present" : "pending";
+  const missingArtifacts =
+    input.scenario === "success"
+      ? []
+      : input.handoff.recovery.scope.artifact_paths_missing_after_recovery.map((path) =>
+          join(input.workspaceDir, path),
+        );
 
   return {
     ...input.handoff,
+    recovery: {
+      ...input.handoff.recovery,
+      scope: {
+        ...input.handoff.recovery.scope,
+        artifact_paths_missing_after_recovery: missingArtifacts,
+      },
+    },
     evidence: {
       ...input.handoff.evidence,
       artifacts: input.handoff.evidence.artifacts.map((artifact) => {
@@ -172,6 +211,13 @@ export function buildSummaryVerificationHandoff(input: {
           };
         }
 
+        if (artifact.kind === "approval_request") {
+          return {
+            ...artifact,
+            path: `${input.summaryPath}#verification_handoff.approval_workflow.request`,
+          };
+        }
+
         if (artifact.kind === "recovery_record") {
           return {
             ...artifact,
@@ -182,14 +228,13 @@ export function buildSummaryVerificationHandoff(input: {
         if (artifact.kind === "approval_record") {
           return {
             ...artifact,
-            path: `${input.summaryPath}#verification_handoff.governance.approval_gate`,
+            path: `${input.summaryPath}#verification_handoff.approval_workflow.decision`,
           };
         }
 
         return artifact;
       }),
-      missing_artifacts:
-        input.scenario === "success" ? [] : [input.runtimeLogPath],
+      missing_artifacts: missingArtifacts,
     },
   };
 }
@@ -218,8 +263,8 @@ export function buildVerificationEvidenceSummary(input: {
                 ? "waiting_for_independent_verifier"
                 : "not_required",
     approval_status: input.handoff.evidence.approval_status,
-    approval_artifact_path: input.handoff.governance.approval_gate.artifact_path
-      ? `${input.summaryPath}#verification_handoff.governance.approval_gate`
+    approval_artifact_path: input.handoff.approval_workflow.decision.decision_artifact_path
+      ? `${input.summaryPath}#verification_handoff.approval_workflow.decision`
       : null,
     authorization_exception: input.handoff.governance.authorization_boundary.exception,
     input_boundary_summary: input.handoff.governance.input_defense.map((entry) => ({
@@ -233,7 +278,25 @@ export function buildVerificationEvidenceSummary(input: {
     workspace_dir: input.workspaceDir,
     summary_path: input.summaryPath,
     runtime_log_path: input.runtimeLogPath,
+    missing_artifacts:
+      input.scenario === "success"
+        ? []
+        : input.handoff.recovery.scope.artifact_paths_missing_after_recovery.map((path) =>
+            join(input.workspaceDir, path),
+          ),
     recovery_outcome: input.handoff.recovery.outcome_classification,
+    recovery_scope: {
+      attempted_write_paths: input.handoff.recovery.scope.attempted_write_paths,
+      changed_paths: input.handoff.recovery.scope.changed_paths,
+      restored_paths: input.handoff.recovery.scope.restored_paths,
+      unrestored_paths: input.handoff.recovery.scope.unrestored_paths,
+      artifact_paths_missing_after_recovery:
+        input.scenario === "success"
+          ? []
+          : input.handoff.recovery.scope.artifact_paths_missing_after_recovery.map((path) =>
+              join(input.workspaceDir, path),
+            ),
+    },
   };
 }
 
@@ -243,6 +306,7 @@ export function buildOperatorSummary(input: {
   workspaceDir: string;
   summaryPath: string;
   runtimeLogPath: string;
+  providerHandshakePath: string;
   handoff: Awaited<ReturnType<typeof runExecutableRuntime>>["verification_handoff"];
 }): RuntimeFixtureOperatorSummary {
   return {
@@ -256,7 +320,7 @@ export function buildOperatorSummary(input: {
         : "Runtime execution failed. Rollback and requeue were recorded for the next attempt.",
     next_action:
       input.scenario === "success"
-        ? "Open run-result.json, confirm governance.approval_gate and input_defense, then collect the approval artifact and run the listed validation commands."
+        ? "Open run-result.json, confirm approval_workflow and input_defense, then collect the approval decision artifact and run the listed validation commands."
         : "Open run-result.json, confirm recovery.steps and missing_artifacts, then inspect the requeued inputs before retrying.",
     key_paths: {
       artifact_dir: input.artifactDir,
@@ -264,16 +328,19 @@ export function buildOperatorSummary(input: {
       summary_path: input.summaryPath,
       runtime_log_path: input.runtimeLogPath,
       governance_path: `${input.summaryPath}#verification_handoff.governance`,
+      provider_handshake_path: input.providerHandshakePath,
     },
     checks:
       input.scenario === "success"
         ? [
+            "provider_handshake.protocol_version must be provider-module-v1",
             "heartbeat.outcome must be patched",
             "verification_evidence.promotion_gate must be waiting_for_human_approval_and_independent_verifier",
-            "verification_handoff.governance.approval_gate.status must be pending_human_approval",
+            "verification_handoff.approval_workflow.status must be pending_human_approval",
             "runtime_log_path must exist",
           ]
         : [
+            "provider_handshake.protocol_version must be provider-module-v1",
             "heartbeat.outcome must be blocked",
             "verification_evidence.promotion_gate must be rollback_and_requeue_recorded",
             "verification_handoff.recovery.steps must show repo_restore, state_rollback, and issue_requeue as completed",
@@ -284,12 +351,6 @@ export function buildOperatorSummary(input: {
 interface RuntimeFixtureDefinition {
   heartbeat: HeartbeatRecord;
   envelope: TaskEnvelope;
-  provider: {
-    provider_id: string;
-    provider_kind: ProviderKind;
-    model_id: string;
-    execute: Parameters<typeof runExecutableRuntime>[0]["provider"]["execute"];
-  };
   skillLoader: StaticSkillLoader;
   requiredSkillIds: string[];
   verificationRecords: VerificationRecord[];
@@ -402,32 +463,19 @@ function createRuntimeFixture(
   return {
     heartbeat,
     envelope,
-    provider: {
-      provider_id: "openai-runtime",
-      provider_kind: ProviderKind.OpenAI,
-      model_id: "gpt-5.4",
-      async execute(request) {
-        if (scenario === "failure") {
-          await request.repo.write("artifacts/runtime.log", "transient execution");
-          throw new Error("simulated runtime failure");
-        }
-
-        await request.repo.write(
-          "artifacts/runtime.log",
-          `${request.envelope.objective} :: ${request.inputs[0]!.content}`,
-        );
-
-        return {
-          provider_id: "openai-runtime",
-          model_id: "gpt-5.4",
-          summary: "executed runtime heartbeat turn",
-        };
-      },
-    },
     skillLoader,
     requiredSkillIds: ["runtime-writer"],
     verificationRecords,
   };
+}
+
+function createRuntimeFixtureProviderModule(baseUrl: string): ProviderApiModule {
+  return createOpenAICompatibleProviderModule({
+    providerId: "openai-runtime",
+    providerKind: ProviderKind.OpenAI,
+    modelId: "gpt-5.4",
+    baseUrl,
+  });
 }
 
 async function seedWorkspace(
@@ -457,6 +505,7 @@ async function main(): Promise<void> {
         workspace_dir: result.workspaceDir,
         summary_path: result.summaryPath,
         runtime_log_path: result.runtimeLogPath,
+        provider_handshake_path: result.providerHandshakePath,
         operator_summary: summary.operator_summary,
       },
       null,

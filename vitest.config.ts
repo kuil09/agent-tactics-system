@@ -10,6 +10,7 @@ export default defineConfig({
         "artifacts/**",
         "scripts/**",
         "src/contracts/types.ts",
+        "src/runtime/cli-main.ts",
         "src/skills/contracts.ts",
         "vitest.config.ts",
       ],

@@ -45,7 +45,7 @@ export interface ExecutableRuntimeState extends CanonicalState {
 }
 
 export interface VerificationHandoff {
-  contract_version: "m4";
+  contract_version: "m5";
   subject_id: string;
   executor_provider_id: string;
   executor_provider_kind: ProviderKind;
@@ -54,6 +54,7 @@ export interface VerificationHandoff {
   rollback_to_version: number | null;
   replay: VerificationReplaySummary;
   evidence: VerificationEvidenceBundle;
+  approval_workflow: ApprovalWorkflowHandoff;
   governance: GovernanceEvidence;
   recovery: RuntimeRecoveryState;
 }
@@ -81,11 +82,47 @@ export interface VerificationArtifact {
     | "state_snapshot"
     | "verification_replay"
     | "execution_log"
+    | "approval_request"
     | "recovery_record"
     | "approval_record";
   path: string;
   required: boolean;
   status: "present" | "pending";
+}
+
+export interface ApprovalWorkflowHandoff {
+  workflow_id: string;
+  status: ApprovalGateStatus;
+  request: ApprovalRequestHandoff;
+  decision: ApprovalDecisionHandoff;
+  release: ApprovalReleaseHandoff;
+}
+
+export interface ApprovalRequestHandoff {
+  requested_role: "human_operator";
+  request_channel: "handoff_artifact";
+  request_artifact_path: string | null;
+  issued_at: string | null;
+  summary: string;
+  required_evidence: string[];
+  validation_commands: string[];
+}
+
+export interface ApprovalDecisionHandoff {
+  status: ApprovalGateStatus;
+  decision_artifact_path: string | null;
+  recorded_by: string | null;
+  recorded_at: string | null;
+  resolution_criteria: string[];
+  blocked_reason: string | null;
+}
+
+export interface ApprovalReleaseHandoff {
+  promotion_action: "promote_done_candidate_to_complete";
+  release_blocked: boolean;
+  blockers: string[];
+  unblock_checklist: string[];
+  next_owner: "human_operator" | "system_orchestrator";
 }
 
 export interface GovernanceEvidence {
@@ -122,6 +159,7 @@ export interface InputDefenseEvidence {
 export interface GovernanceAuditEntry {
   event:
     | "approval_gate_declared"
+    | "approval_workflow_declared"
     | "input_boundary_recorded"
     | "promotion_blocked"
     | "rollback_recorded";
@@ -137,7 +175,16 @@ export interface RuntimeRecoveryState {
   repo_restored: boolean;
   requeued: boolean;
   reason: string | null;
+  scope: RuntimeRecoveryScope;
   steps: RuntimeRecoveryStep[];
+}
+
+export interface RuntimeRecoveryScope {
+  attempted_write_paths: string[];
+  changed_paths: string[];
+  restored_paths: string[];
+  unrestored_paths: string[];
+  artifact_paths_missing_after_recovery: string[];
 }
 
 export interface RuntimeRecoveryStep {
@@ -216,12 +263,13 @@ export async function runExecutableRuntime(
   const repoSnapshot = isSnapshotCapableRepoAdapter(input.repo)
     ? await input.repo.createSnapshot()
     : null;
+  const observedRepo = new ObservedRepoAdapter(input.repo);
 
   try {
     const executed = await executeTaskEnvelope({
       envelope: input.envelope,
       provider: input.provider,
-      repo: input.repo,
+      repo: observedRepo,
       skill_loader: input.skill_loader,
       required_skill_ids: input.required_skill_ids,
     });
@@ -229,9 +277,14 @@ export async function runExecutableRuntime(
       envelope: input.envelope,
       outcome: HeartbeatOutcome.Patched,
     });
+    const approvalWorkflow = buildApprovalWorkflowHandoff({
+      heartbeat: input.heartbeat,
+      envelope: input.envelope,
+      outcome: HeartbeatOutcome.Patched,
+    });
 
     const verificationHandoff: VerificationHandoff = {
-      contract_version: "m4",
+      contract_version: "m5",
       subject_id: input.heartbeat.issue_id,
       executor_provider_id: executed.result.provider_id,
       executor_provider_kind: input.provider.provider_kind ?? ProviderKind.Other,
@@ -249,6 +302,7 @@ export async function runExecutableRuntime(
         rollbackToVersion: issuedPatch.version,
         recoveryAttempted: false,
       }),
+      approval_workflow: approvalWorkflow,
       governance,
       recovery: {
         attempted: false,
@@ -258,6 +312,13 @@ export async function runExecutableRuntime(
         repo_restored: false,
         requeued: false,
         reason: null,
+        scope: {
+          attempted_write_paths: observedRepo.getWrittenPaths(),
+          changed_paths: [],
+          restored_paths: [],
+          unrestored_paths: [],
+          artifact_paths_missing_after_recovery: [],
+        },
         steps: [
           {
             step: "repo_restore",
@@ -348,12 +409,34 @@ export async function runExecutableRuntime(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const attemptedWritePaths = observedRepo.getWrittenPaths();
+    let changedPaths = attemptedWritePaths;
     let repoRestored = false;
+    let restoredPaths: string[] = [];
+    let unrestoredPaths = changedPaths;
+    let recoveredRepoSnapshot: unknown = null;
 
     if (repoSnapshot !== null && isSnapshotCapableRepoAdapter(input.repo)) {
+      const failedSnapshot = await input.repo.createSnapshot();
+      changedPaths = collectChangedRepoPaths(repoSnapshot, failedSnapshot);
       await input.repo.restoreSnapshot(repoSnapshot);
       repoRestored = true;
+
+      recoveredRepoSnapshot = await input.repo.createSnapshot();
+      restoredPaths = changedPaths.filter((path) =>
+        repoFileContentEquals(repoSnapshot, recoveredRepoSnapshot, path),
+      );
+      unrestoredPaths = changedPaths.filter(
+        (path) => !restoredPaths.includes(path),
+      );
     }
+
+    const artifactPathsMissingAfterRecovery = changedPaths.filter(
+      (path) =>
+        path.startsWith("artifacts/") &&
+        !pathExistsInSnapshot(repoSnapshot, path) &&
+        !pathExistsInSnapshot(recoveredRepoSnapshot, path),
+    );
 
     /* c8 ignore next 4 */
     const rollbackSnapshot =
@@ -390,6 +473,13 @@ export async function runExecutableRuntime(
       repo_restored: repoRestored,
       requeued: true,
       reason: message,
+      scope: {
+        attempted_write_paths: attemptedWritePaths,
+        changed_paths: changedPaths,
+        restored_paths: restoredPaths,
+        unrestored_paths: unrestoredPaths,
+        artifact_paths_missing_after_recovery: artifactPathsMissingAfterRecovery,
+      },
       steps: [
         {
           step: "repo_restore",
@@ -418,8 +508,13 @@ export async function runExecutableRuntime(
       envelope: input.envelope,
       outcome: HeartbeatOutcome.Blocked,
     });
+    const approvalWorkflow = buildApprovalWorkflowHandoff({
+      heartbeat: input.heartbeat,
+      envelope: input.envelope,
+      outcome: HeartbeatOutcome.Blocked,
+    });
     const verificationHandoff: VerificationHandoff = {
-      contract_version: "m4",
+      contract_version: "m5",
       subject_id: input.heartbeat.issue_id,
       executor_provider_id: input.provider.provider_id,
       executor_provider_kind: input.provider.provider_kind ?? ProviderKind.Other,
@@ -437,6 +532,7 @@ export async function runExecutableRuntime(
         rollbackToVersion: executionRollbackVersion,
         recoveryAttempted: true,
       }),
+      approval_workflow: approvalWorkflow,
       governance,
       recovery: recoveryState,
     };
@@ -524,6 +620,11 @@ function buildVerificationEvidence(input: {
     envelope: input.envelope,
     outcome: input.outcome,
   });
+  const approvalWorkflow = buildApprovalWorkflowHandoff({
+    heartbeat: null,
+    envelope: input.envelope,
+    outcome: input.outcome,
+  });
   const artifacts: VerificationArtifact[] = [
     {
       label: "canonical state snapshot",
@@ -547,9 +648,16 @@ function buildVerificationEvidence(input: {
       status: "pending",
     },
     {
+      label: "approval workflow request",
+      kind: "approval_request",
+      path: "state://verification_handoff/approval_workflow/request",
+      required: governance.approval_gate.approval_required,
+      status: governance.approval_gate.approval_required ? "present" : "pending",
+    },
+    {
       label: "approval gate record",
       kind: "approval_record",
-      path: "state://verification_handoff/governance/approval_gate",
+      path: "state://verification_handoff/approval_workflow/decision",
       required: governance.approval_gate.approval_required,
       status: governance.approval_gate.approval_required ? "present" : "pending",
     },
@@ -569,8 +677,8 @@ function buildVerificationEvidence(input: {
   return {
     verification_required: input.verificationRequired,
     independent_verifier_required: input.verificationRequired,
-    approval_required: governance.approval_gate.approval_required,
-    approval_status: governance.approval_gate.status,
+    approval_required: approvalWorkflow.status !== "not_required",
+    approval_status: approvalWorkflow.status,
     handoff_ready: missingArtifacts.length === 0,
     summary: input.verificationRequired
       ? "independent verifier evidence and a recorded human approval are required before promotion"
@@ -602,6 +710,13 @@ function buildGovernanceEvidence(input: {
       detail: approvalRequired
         ? "promotion requires a recorded human approval artifact"
         : "approval gate not required for this envelope",
+    },
+    {
+      event: "approval_workflow_declared",
+      path: "state://verification_handoff/approval_workflow",
+      detail: approvalRequired
+        ? "approval handoff records the request, decision, and release criteria"
+        : "approval workflow handoff is not required for this envelope",
     },
     {
       event: "input_boundary_recorded",
@@ -650,6 +765,93 @@ function buildGovernanceEvidence(input: {
     },
     input_defense: inputDefense,
     audit_trail: auditTrail,
+  };
+}
+
+function buildApprovalWorkflowHandoff(input: {
+  heartbeat: HeartbeatRecord | null;
+  envelope: TaskEnvelope;
+  outcome: HeartbeatOutcome;
+}): ApprovalWorkflowHandoff {
+  const approvalRequired = input.envelope.verification_required;
+  const status: ApprovalGateStatus = !approvalRequired
+    ? "not_required"
+    : input.outcome === HeartbeatOutcome.Blocked
+      ? "blocked_by_recovery"
+      : "pending_human_approval";
+  const requestArtifactPath = approvalRequired
+    ? "state://verification_handoff/approval_workflow/request"
+    : null;
+  const decisionArtifactPath = approvalRequired
+    ? "state://verification_handoff/approval_workflow/decision"
+    : null;
+
+  return {
+    workflow_id: `approval-${input.heartbeat?.issue_id ?? "runtime"}`,
+    status,
+    request: {
+      requested_role: "human_operator",
+      request_channel: "handoff_artifact",
+      request_artifact_path: requestArtifactPath,
+      issued_at: input.heartbeat?.finished_at ?? input.heartbeat?.started_at ?? null,
+      summary: approvalRequired
+        ? "Review the execution evidence, confirm the trust boundaries, and record a promotion decision."
+        : "No separate approval request is required for this envelope.",
+      required_evidence: approvalRequired
+        ? [
+            "state://verification_handoff/replay",
+            "workspace://artifacts/runtime.log",
+            "state://verification_handoff/governance/input_defense",
+          ]
+        : [],
+      validation_commands: approvalRequired
+        ? ["npm run runtime:fixture", "npm run typecheck", "npm test"]
+        : [],
+    },
+    decision: {
+      status,
+      decision_artifact_path: decisionArtifactPath,
+      recorded_by: null,
+      recorded_at: null,
+      resolution_criteria: approvalRequired
+        ? [
+            "verification replay remains in pass status",
+            "an authorized operator records the approval decision",
+            "promotion is retried with approval:grant permission",
+          ]
+        : [],
+      blocked_reason:
+        status === "pending_human_approval"
+          ? "human approval has not been recorded yet"
+          : status === "blocked_by_recovery"
+            ? "execution failed, so approval stays blocked until rollback evidence is reviewed"
+            : null,
+    },
+    release: {
+      promotion_action: "promote_done_candidate_to_complete",
+      release_blocked: status !== "not_required",
+      blockers:
+        status === "pending_human_approval"
+          ? ["human approval artifact missing", "approval:grant permission missing"]
+          : status === "blocked_by_recovery"
+            ? ["rollback review incomplete", "issue must be rerun successfully"]
+            : [],
+      unblock_checklist:
+        status === "pending_human_approval"
+          ? [
+              "record the approval decision artifact",
+              "confirm independent verification evidence still passes",
+              "rerun promotion with approval:grant",
+            ]
+          : status === "blocked_by_recovery"
+            ? [
+                "review rollback and missing artifact evidence",
+                "rerun the issue successfully",
+                "reissue the approval request after recovery",
+              ]
+            : [],
+      next_owner: status === "not_required" ? "system_orchestrator" : "human_operator",
+    },
   };
 }
 
@@ -748,4 +950,69 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function isDeepEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+class ObservedRepoAdapter implements RepoAdapter {
+  private readonly writtenPaths = new Set<string>();
+
+  constructor(private readonly delegate: RepoAdapter) {}
+
+  read(path: string): Promise<string> | string {
+    return this.delegate.read(path);
+  }
+
+  write(path: string, content: string): Promise<void> | void {
+    this.writtenPaths.add(path);
+    return this.delegate.write(path, content);
+  }
+
+  getWrittenPaths(): string[] {
+    return [...this.writtenPaths];
+  }
+}
+
+function collectChangedRepoPaths(
+  previousSnapshot: unknown,
+  nextSnapshot: unknown,
+): string[] {
+  const previous = coerceRepoSnapshot(previousSnapshot);
+  const next = coerceRepoSnapshot(nextSnapshot);
+  const paths = new Set<string>([
+    ...Object.keys(previous),
+    ...Object.keys(next),
+  ]);
+
+  return [...paths].filter((path) => previous[path] !== next[path]).sort();
+}
+
+function coerceRepoSnapshot(snapshot: unknown): Record<string, string> {
+  if (typeof snapshot !== "object" || snapshot === null) {
+    return {};
+  }
+
+  const record: Record<string, string> = {};
+
+  for (const [path, content] of Object.entries(snapshot)) {
+    if (typeof content === "string") {
+      record[path] = content;
+    }
+  }
+
+  return record;
+}
+
+function repoFileContentEquals(
+  leftSnapshot: unknown,
+  rightSnapshot: unknown,
+  path: string,
+): boolean {
+  const left = coerceRepoSnapshot(leftSnapshot);
+  const right = coerceRepoSnapshot(rightSnapshot);
+
+  return left[path] === right[path];
+}
+
+function pathExistsInSnapshot(snapshot: unknown, path: string): boolean {
+  const record = coerceRepoSnapshot(snapshot);
+  return path in record;
 }

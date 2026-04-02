@@ -1,3 +1,4 @@
+import { ProviderKind } from "../../contracts/enums.js";
 import type { TaskEnvelope } from "../../contracts/types.js";
 import type { LoadedSkillContract, SkillLoader } from "../../skills/contracts.js";
 import { loadRequiredSkills } from "../../skills/loader.js";
@@ -15,6 +16,34 @@ export interface ProviderExecutionResult {
   provider_id: string;
   model_id: string;
   summary: string;
+}
+
+export interface ProviderHandshakeContext {
+  scenario?: string;
+  workspace_root?: string;
+  artifact_dir?: string;
+}
+
+export interface ProviderHandshakeResult {
+  provider_id: string;
+  provider_kind: ProviderKind;
+  model_id: string;
+  protocol_version: string;
+  summary: string;
+  metadata?: Record<string, string>;
+}
+
+export interface ProviderModuleExecutionRequest extends ProviderExecutionRequest {
+  handshake: ProviderHandshakeResult;
+}
+
+export interface ProviderApiModule {
+  handshake(
+    context: ProviderHandshakeContext,
+  ): Promise<ProviderHandshakeResult> | ProviderHandshakeResult;
+  execute(
+    request: ProviderModuleExecutionRequest,
+  ): Promise<ProviderExecutionResult> | ProviderExecutionResult;
 }
 
 export interface ProviderApiAdapter {
@@ -37,6 +66,41 @@ export interface ExecutedTaskEnvelope {
   result: ProviderExecutionResult;
   inputs: MaterializedTaskInput[];
   skills: LoadedSkillContract[];
+}
+
+export interface ConnectedProviderApiAdapter extends ProviderApiAdapter {
+  provider_kind: ProviderKind;
+  handshake: ProviderHandshakeResult;
+}
+
+export async function connectProviderApiAdapter(input: {
+  module: ProviderApiModule;
+  context?: ProviderHandshakeContext;
+}): Promise<ConnectedProviderApiAdapter> {
+  const handshake = await input.module.handshake(input.context ?? {});
+
+  if (
+    handshake.provider_id.length === 0 ||
+    handshake.model_id.length === 0 ||
+    handshake.protocol_version.length === 0
+  ) {
+    throw new Error(
+      "provider handshake must include provider_id, model_id, and protocol_version",
+    );
+  }
+
+  return {
+    provider_id: handshake.provider_id,
+    provider_kind: handshake.provider_kind,
+    model_id: handshake.model_id,
+    handshake,
+    execute(request) {
+      return input.module.execute({
+        ...request,
+        handshake,
+      });
+    },
+  };
 }
 
 export async function executeTaskEnvelope(
