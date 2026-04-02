@@ -22,6 +22,7 @@ async function main(): Promise<void> {
         workspace_dir: result.workspaceDir,
         summary_path: result.summaryPath,
         runtime_log_path: result.runtimeLogPath,
+        provider_handshake_path: result.providerHandshakePath,
         operator_summary: summary.operator_summary,
       },
       null,

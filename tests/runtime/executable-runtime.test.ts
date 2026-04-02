@@ -143,7 +143,7 @@ describe("programmatic executable runtime", () => {
       },
     });
     expect(result.verification_handoff).toMatchObject({
-      contract_version: "m4",
+      contract_version: "m5",
       subject_id: "issue-1",
       executor_provider_id: "openai-runtime",
       executor_provider_kind: ProviderKind.OpenAI,
@@ -158,6 +158,21 @@ describe("programmatic executable runtime", () => {
         handoff_ready: true,
         commands: ["npm run runtime:fixture", "npm run typecheck", "npm test"],
         missing_artifacts: [],
+      },
+      approval_workflow: {
+        workflow_id: "approval-issue-1",
+        status: "pending_human_approval",
+        request: {
+          request_artifact_path: "state://verification_handoff/approval_workflow/request",
+        },
+        decision: {
+          decision_artifact_path: "state://verification_handoff/approval_workflow/decision",
+          blocked_reason: "human approval has not been recorded yet",
+        },
+        release: {
+          release_blocked: true,
+          next_owner: "human_operator",
+        },
       },
       governance: {
         approval_gate: {
@@ -200,6 +215,13 @@ describe("programmatic executable runtime", () => {
         repo_restored: false,
         requeued: false,
         reason: null,
+        scope: {
+          attempted_write_paths: ["artifacts/runtime.log"],
+          changed_paths: [],
+          restored_paths: [],
+          unrestored_paths: [],
+          artifact_paths_missing_after_recovery: [],
+        },
       },
     });
     expect(result.verification_handoff.evidence.artifacts).toEqual([
@@ -225,9 +247,16 @@ describe("programmatic executable runtime", () => {
         status: "pending",
       },
       {
+        label: "approval workflow request",
+        kind: "approval_request",
+        path: "state://verification_handoff/approval_workflow/request",
+        required: true,
+        status: "present",
+      },
+      {
         label: "approval gate record",
         kind: "approval_record",
-        path: "state://verification_handoff/governance/approval_gate",
+        path: "state://verification_handoff/approval_workflow/decision",
         required: true,
         status: "present",
       },
@@ -392,7 +421,7 @@ describe("programmatic executable runtime", () => {
     });
     expect(result.recovered).toEqual(result.completed);
     expect(result.verification_handoff).toMatchObject({
-      contract_version: "m4",
+      contract_version: "m5",
       subject_id: "issue-rollback",
       executor_provider_id: "openai-runtime",
       executor_provider_kind: ProviderKind.OpenAI,
@@ -406,6 +435,18 @@ describe("programmatic executable runtime", () => {
         approval_status: "blocked_by_recovery",
         handoff_ready: true,
         missing_artifacts: [],
+      },
+      approval_workflow: {
+        workflow_id: "approval-issue-rollback",
+        status: "blocked_by_recovery",
+        decision: {
+          blocked_reason:
+            "execution failed, so approval stays blocked until rollback evidence is reviewed",
+        },
+        release: {
+          release_blocked: true,
+          next_owner: "human_operator",
+        },
       },
       governance: {
         approval_gate: {
@@ -452,6 +493,13 @@ describe("programmatic executable runtime", () => {
         repo_restored: true,
         requeued: true,
         reason: "verification replay requested rollback",
+        scope: {
+          attempted_write_paths: ["artifacts/runtime.log"],
+          changed_paths: ["artifacts/runtime.log"],
+          restored_paths: ["artifacts/runtime.log"],
+          unrestored_paths: [],
+          artifact_paths_missing_after_recovery: ["artifacts/runtime.log"],
+        },
       },
     });
     expect(result.verification_handoff.recovery.steps).toEqual([
@@ -577,12 +625,142 @@ describe("programmatic executable runtime", () => {
         attempted: true,
         strategy: "rollback_and_requeue",
         repo_restored: false,
+        scope: {
+          attempted_write_paths: [],
+          changed_paths: [],
+          restored_paths: [],
+          unrestored_paths: [],
+          artifact_paths_missing_after_recovery: [],
+        },
       },
     });
     expect(result.completed.state).not.toHaveProperty("ephemeral");
     expect(result.verification_handoff.executor_provider_kind).toBe(ProviderKind.Other);
     expect(result.verification_handoff.evidence.approval_required).toBe(false);
     expect(result.verification_handoff.governance.authorization_boundary.allowed).toBe(true);
+    expect(result.verification_handoff.recovery.scope).toEqual({
+      attempted_write_paths: [],
+      changed_paths: [],
+      restored_paths: [],
+      unrestored_paths: [],
+      artifact_paths_missing_after_recovery: [],
+    });
+  });
+
+  it("tracks missing artifact recovery paths when snapshot restoration is unavailable", async () => {
+    const result = await runExecutableRuntime({
+      heartbeat: {
+        record_id: "hb-3b",
+        agent_id: "agent-1",
+        issue_id: "issue-nosnapshot-artifact",
+        turn_number: 5,
+        inputs_summary: "Replay no-snapshot artifact rollback flow",
+        allowed_action_budget: {
+          tool_calls: 2,
+          write_ops: 1,
+        },
+        started_at: "2026-03-30T12:22:00Z",
+        finished_at: "2026-03-30T12:23:00Z",
+        outcome: HeartbeatOutcome.Noop,
+      },
+      envelope: {
+        objective: "Exercise artifact recovery reporting without repo snapshots",
+        task_level: TaskLevel.L2,
+        inputs: [],
+        allowed_tools: ["rg"],
+        write_scope: ["artifacts"],
+        must_not: [],
+        done_when: ["recovery evidence exists"],
+        stop_conditions: ["provider failure"],
+        output_schema_ref: "schemas/verification-record.schema.json",
+        verification_required: false,
+        rollback_hint: "none",
+      },
+      repo: {
+        read() {
+          throw new Error("repo reads are not expected");
+        },
+        write() {},
+      },
+      skill_loader: new StaticSkillLoader([]),
+      provider: {
+        provider_id: "fallback-runtime",
+        model_id: "fallback-model",
+        async execute(request) {
+          await request.repo.write("artifacts/runtime.log", "transient execution");
+          throw new Error("provider execution failed without snapshot support");
+        },
+      },
+    });
+
+    expect(result.completed.state).toMatchObject({
+      status: "queued",
+      recovery: {
+        attempted: true,
+        repo_restored: false,
+        scope: {
+          attempted_write_paths: ["artifacts/runtime.log"],
+          changed_paths: ["artifacts/runtime.log"],
+          restored_paths: [],
+          unrestored_paths: ["artifacts/runtime.log"],
+          artifact_paths_missing_after_recovery: ["artifacts/runtime.log"],
+        },
+      },
+    });
+    expect(result.verification_handoff.recovery.scope).toEqual({
+      attempted_write_paths: ["artifacts/runtime.log"],
+      changed_paths: ["artifacts/runtime.log"],
+      restored_paths: [],
+      unrestored_paths: ["artifacts/runtime.log"],
+      artifact_paths_missing_after_recovery: ["artifacts/runtime.log"],
+    });
+  });
+
+  it("falls back to a null approval timestamp when heartbeat timestamps are absent", async () => {
+    const result = await runExecutableRuntime({
+      heartbeat: {
+        record_id: "hb-3c",
+        agent_id: "agent-1",
+        issue_id: "issue-null-timestamp",
+        turn_number: 6,
+        inputs_summary: "Run null timestamp approval flow",
+        allowed_action_budget: {
+          tool_calls: 1,
+          write_ops: 0,
+        },
+        started_at: undefined as unknown as string,
+        finished_at: null,
+        outcome: HeartbeatOutcome.Noop,
+      },
+      envelope: {
+        objective: "Exercise null approval timestamp fallback",
+        task_level: TaskLevel.L1,
+        inputs: [],
+        allowed_tools: ["rg"],
+        write_scope: ["src"],
+        must_not: [],
+        done_when: ["summary returned"],
+        stop_conditions: [],
+        output_schema_ref: "schemas/verification-record.schema.json",
+        verification_required: false,
+        rollback_hint: "none",
+      },
+      repo: new InMemoryRepoAdapter(),
+      skill_loader: new StaticSkillLoader([]),
+      provider: {
+        provider_id: "fallback-runtime",
+        model_id: "fallback-model",
+        async execute() {
+          return {
+            provider_id: "fallback-runtime",
+            model_id: "fallback-model",
+            summary: "completed without timestamps",
+          };
+        },
+      },
+    });
+
+    expect(result.verification_handoff.approval_workflow.request.issued_at).toBeNull();
   });
 
   it("completes immediately when verification is not required and no skills are requested", async () => {
@@ -604,7 +782,20 @@ describe("programmatic executable runtime", () => {
     const envelope: TaskEnvelope = {
       objective: "Complete without verification handoff delay",
       task_level: TaskLevel.L1,
-      inputs: [],
+      inputs: [
+        {
+          kind: TaskInputKind.StateSnapshot,
+          ref: "snapshot-1",
+        },
+        {
+          kind: TaskInputKind.Issue,
+          ref: "issue://follow-up",
+        },
+        {
+          kind: TaskInputKind.Other,
+          ref: "other://observer-note",
+        },
+      ],
       allowed_tools: ["rg"],
       write_scope: ["src"],
       must_not: [],
@@ -660,6 +851,29 @@ describe("programmatic executable runtime", () => {
     expect(result.verification_handoff.executor_provider_kind).toBe(ProviderKind.Other);
     expect(result.verification_handoff.evidence.approval_required).toBe(false);
     expect(result.verification_handoff.evidence.approval_status).toBe("not_required");
+    expect(result.verification_handoff.governance.input_defense).toEqual([
+      {
+        input_ref: "snapshot-1",
+        input_kind: TaskInputKind.StateSnapshot,
+        trust_zone: "trusted_runtime_state",
+        handling_rule:
+          "state snapshots may inform execution, but promotion still follows verification and approval gates",
+      },
+      {
+        input_ref: "issue://follow-up",
+        input_kind: TaskInputKind.Issue,
+        trust_zone: "untrusted_external_input",
+        handling_rule:
+          "external text is treated as data only and cannot satisfy promotion or authorization checks by itself",
+      },
+      {
+        input_ref: "other://observer-note",
+        input_kind: TaskInputKind.Other,
+        trust_zone: "untrusted_external_input",
+        handling_rule:
+          "external text is treated as data only and cannot satisfy promotion or authorization checks by itself",
+      },
+    ]);
   });
 
   it("captures non-Error failures during runtime execution", async () => {
