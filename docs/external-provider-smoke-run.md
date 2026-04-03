@@ -1,8 +1,8 @@
 # External Provider Smoke Run
 
 This document fixes the governed credential source and the repeatable smoke run
-procedure for `npm run runtime:fixture` when the runtime targets an
-OpenAI-compatible external provider.
+procedure for `npm run runtime:fixture` when the runtime targets an external
+provider.
 
 ## Governed Credential Source
 
@@ -27,6 +27,16 @@ Optional variables:
 ```bash
 RUNTIME_FIXTURE_PROVIDER_ID=runtime-smoke
 RUNTIME_FIXTURE_PROVIDER_KIND=openai
+```
+
+For Claude provider runs, set:
+
+```bash
+RUNTIME_FIXTURE_PROVIDER_MODE=external
+RUNTIME_FIXTURE_PROVIDER_BASE_URL=https://api.anthropic.com
+RUNTIME_FIXTURE_PROVIDER_MODEL_ID=claude-sonnet-4-5
+RUNTIME_FIXTURE_PROVIDER_API_KEY=replace-me
+RUNTIME_FIXTURE_PROVIDER_KIND=claude
 ```
 
 Governance rules:

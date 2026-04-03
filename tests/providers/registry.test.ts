@@ -85,6 +85,14 @@ describe("provider registry", () => {
     ).toBe(TrustTier.T1);
     expect(
       createProviderRegistryEntry({
+        provider_id: "copilot-prod",
+        provider_kind: ProviderKind.Copilot,
+        transport: Transport.Api,
+        models: [],
+      }).trust_tier,
+    ).toBe(TrustTier.T1);
+    expect(
+      createProviderRegistryEntry({
         provider_id: "local-prod",
         provider_kind: ProviderKind.LocalOpenAICompatible,
         transport: Transport.Embedded,

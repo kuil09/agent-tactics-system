@@ -35,6 +35,7 @@ export function inferTrustTier(providerKind: ProviderKind): TrustTier {
     case ProviderKind.Claude:
       return TrustTier.T3;
     case ProviderKind.OpenCode:
+    case ProviderKind.Copilot:
     case ProviderKind.Cursor:
       return TrustTier.T1;
     case ProviderKind.LocalOpenAICompatible:

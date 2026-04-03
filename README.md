@@ -80,8 +80,10 @@ npm run runtime:fixture
 npm run runtime:fixture -- --scenario=failure
 ```
 
-The same CLI now supports an operator-supplied OpenAI-compatible endpoint while
-preserving the shared artifact contract:
+The same CLI now supports operator-supplied external providers while preserving
+the shared artifact contract.
+
+OpenAI-compatible providers:
 
 ```bash
 RUNTIME_FIXTURE_PROVIDER_MODE=external \
@@ -91,10 +93,21 @@ RUNTIME_FIXTURE_PROVIDER_API_KEY=redacted \
 npm run runtime:fixture
 ```
 
+Claude-compatible providers:
+
+```bash
+RUNTIME_FIXTURE_PROVIDER_MODE=external \
+RUNTIME_FIXTURE_PROVIDER_KIND=claude \
+RUNTIME_FIXTURE_PROVIDER_BASE_URL=https://api.anthropic.com \
+RUNTIME_FIXTURE_PROVIDER_MODEL_ID=claude-sonnet-4-5 \
+RUNTIME_FIXTURE_PROVIDER_API_KEY=redacted \
+npm run runtime:fixture
+```
+
 Optional overrides:
 
 - `--provider-id=<id>` to change the recorded provider identifier
-- `--provider-kind=<openai|claude|opencode|cursor|local_openai_compatible|other>`
+- `--provider-kind=<openai|claude|opencode|copilot|cursor|local_openai_compatible|other>`
 - `--provider-api-key=<key>` for non-production local smoke runs when env vars
   are inconvenient
 
@@ -115,10 +128,10 @@ What the CLI now fixes as the M2 verification seam:
 
 The fixture is intentionally narrow. It proves the shared execution seam and the
 extended M4 artifact contract for verification evidence, rollback handling, and
-a minimum approval gate, while now exercising a real OpenAI-compatible HTTP
-provider handshake against the fixture transport instead of an inline provider
-stub. It still does not claim production provider credentials or a fully
-embedded human approval workflow.
+a minimum approval gate, while now exercising a real provider-family handshake
+for either OpenAI-compatible or Claude-compatible HTTP transports instead of an
+inline provider stub. It still does not claim production provider credentials or
+a fully embedded human approval workflow.
 
 ## M3 Single Operational Flow
 

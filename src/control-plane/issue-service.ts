@@ -19,6 +19,7 @@ export interface IssueRecord {
   updatedAt: string;
   checkout: IssueCheckout | null;
   comments: IssueComment[];
+  documents: IssueDocumentRecord[];
 }
 
 export interface IssueCheckout {
@@ -48,7 +49,8 @@ export interface IssueEvent {
     | "checkout.rejected"
     | "release.granted"
     | "release.rejected"
-    | "comment.created";
+    | "comment.created"
+    | "document.saved";
   outcome: "succeeded" | "rejected";
   detail: string;
   createdAt: string;
@@ -92,6 +94,31 @@ export interface AddCommentInput {
   authorId: string;
   body: string;
   at: string;
+  runId?: string;
+}
+
+export interface IssueDocumentRecord {
+  issueId: string;
+  key: string;
+  title: string;
+  format: string;
+  body: string;
+  revisionId: string;
+  authorId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertIssueDocumentInput {
+  issueId: string;
+  key: string;
+  title: string;
+  format: string;
+  body: string;
+  authorId: string;
+  at: string;
+  baseRevisionId?: string | null;
+  runId?: string;
 }
 
 export class IssueTransitionError extends Error {
@@ -127,6 +154,16 @@ export class IssueReleaseError extends Error {
   }
 }
 
+export class IssueDocumentError extends Error {
+  readonly code: "revision_conflict";
+
+  constructor(code: "revision_conflict", message: string) {
+    super(message);
+    this.name = "IssueDocumentError";
+    this.code = code;
+  }
+}
+
 const TERMINAL_ISSUE_STATUSES: IssueStatus[] = ["done", "cancelled"];
 
 const ALLOWED_STATUS_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
@@ -148,6 +185,8 @@ export class InMemoryIssueService {
 
   private eventSequence = 0;
 
+  private documentRevisionSequence = 0;
+
   createIssue(input: CreateIssueInput): IssueRecord {
     const issue: IssueRecord = {
       id: input.id,
@@ -158,6 +197,7 @@ export class InMemoryIssueService {
       updatedAt: input.createdAt,
       checkout: null,
       comments: [],
+      documents: [],
     };
 
     this.issues.set(issue.id, issue);
@@ -456,10 +496,84 @@ export class InMemoryIssueService {
       createdAt: input.at,
       metadata: {
         comment_id: comment.id,
+        run_id: input.runId ?? null,
       },
     });
 
     return { ...comment };
+  }
+
+  listDocuments(issueId: string): IssueDocumentRecord[] {
+    const issue = this.requireIssue(issueId);
+    return issue.documents
+      .map((document) => ({ ...document }))
+      .sort((left, right) =>
+        left.key === right.key ? sortByUpdatedAt(left, right) : left.key.localeCompare(right.key),
+      );
+  }
+
+  getDocument(issueId: string, key: string): IssueDocumentRecord {
+    const issue = this.requireIssue(issueId);
+    const document = issue.documents.find((entry) => entry.key === key);
+    if (!document) {
+      throw new Error(`document ${key} not found on issue ${issueId}`);
+    }
+
+    return { ...document };
+  }
+
+  upsertDocument(input: UpsertIssueDocumentInput): IssueDocumentRecord {
+    const issue = this.requireIssue(input.issueId);
+    const existingIndex = issue.documents.findIndex((document) => document.key === input.key);
+    const existing = existingIndex >= 0 ? issue.documents[existingIndex]! : null;
+
+    if ((input.baseRevisionId ?? null) !== (existing?.revisionId ?? null)) {
+      throw new IssueDocumentError(
+        "revision_conflict",
+        `document ${input.key} expected base revision ${input.baseRevisionId ?? "null"} but found ${existing?.revisionId ?? "null"}`,
+      );
+    }
+
+    const revisionId = `revision-${this.nextDocumentRevisionId()}`;
+    const document: IssueDocumentRecord = {
+      issueId: issue.id,
+      key: input.key,
+      title: input.title,
+      format: input.format,
+      body: input.body,
+      revisionId,
+      authorId: input.authorId,
+      createdAt: existing?.createdAt ?? input.at,
+      updatedAt: input.at,
+    };
+
+    if (existingIndex >= 0) {
+      issue.documents[existingIndex] = document;
+    } else {
+      issue.documents.push(document);
+    }
+
+    issue.updatedAt = input.at;
+    this.recordEvent(issue.id, {
+      actorId: input.authorId,
+      action: "document.saved",
+      outcome: "succeeded",
+      detail: `document ${input.key} saved`,
+      createdAt: input.at,
+      metadata: {
+        document_key: input.key,
+        revision_id: revisionId,
+        previous_revision_id: existing?.revisionId ?? null,
+        run_id: input.runId ?? null,
+      },
+    });
+    this.appendSystemComment(
+      issue,
+      input.at,
+      `Document \`${input.key}\` saved at revision \`${revisionId}\`.`,
+    );
+
+    return { ...document };
   }
 
   listComments(issueId: string, afterCommentId?: string): IssueComment[] {
@@ -526,6 +640,11 @@ export class InMemoryIssueService {
     this.eventSequence += 1;
     return `event-${this.eventSequence}`;
   }
+
+  private nextDocumentRevisionId(): number {
+    this.documentRevisionSequence += 1;
+    return this.documentRevisionSequence;
+  }
 }
 
 function ensureStatusTransition(current: IssueStatus, next: IssueStatus): void {
@@ -555,6 +674,7 @@ function cloneIssue(issue: IssueRecord): IssueRecord {
     ...issue,
     checkout: issue.checkout ? { ...issue.checkout } : null,
     comments: issue.comments.map((comment) => ({ ...comment })),
+    documents: issue.documents.map((document) => ({ ...document })),
   };
 }
 /* v8 ignore stop */
@@ -565,4 +685,12 @@ function sortByCreatedAt<T extends { createdAt: string; id: string }>(left: T, r
   }
 
   return left.createdAt.localeCompare(right.createdAt);
+}
+
+function sortByUpdatedAt<T extends { updatedAt: string; key: string }>(left: T, right: T): number {
+  if (left.updatedAt === right.updatedAt) {
+    return left.key.localeCompare(right.key);
+  }
+
+  return left.updatedAt.localeCompare(right.updatedAt);
 }

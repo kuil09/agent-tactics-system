@@ -696,4 +696,115 @@ describe("InMemoryIssueService", () => {
 
     expect(service.listEvents("missing")).toEqual([]);
   });
+
+  it("stores issue documents with revision and run-id audit metadata", () => {
+    const service = new InMemoryIssueService();
+    service.createIssue({
+      id: "issue-10",
+      title: "Persist plan documents",
+      description: "Track issue documents via the service layer.",
+      createdAt: "2026-04-02T10:00:00Z",
+      initialStatus: "todo",
+    });
+
+    const created = service.upsertDocument({
+      issueId: "issue-10",
+      key: "plan",
+      title: "Plan",
+      format: "markdown",
+      body: "# Plan\n\nInitial draft",
+      authorId: "agent-1",
+      at: "2026-04-02T10:01:00Z",
+      baseRevisionId: null,
+      runId: "run-plan-1",
+    });
+
+    const updated = service.upsertDocument({
+      issueId: "issue-10",
+      key: "plan",
+      title: "Plan",
+      format: "markdown",
+      body: "# Plan\n\nRevised draft",
+      authorId: "agent-1",
+      at: "2026-04-02T10:02:00Z",
+      baseRevisionId: created.revisionId,
+      runId: "run-plan-2",
+    });
+
+    expect(service.listDocuments("issue-10")).toEqual([
+      {
+        issueId: "issue-10",
+        key: "plan",
+        title: "Plan",
+        format: "markdown",
+        body: "# Plan\n\nRevised draft",
+        revisionId: updated.revisionId,
+        authorId: "agent-1",
+        createdAt: "2026-04-02T10:01:00Z",
+        updatedAt: "2026-04-02T10:02:00Z",
+      },
+    ]);
+    expect(service.getDocument("issue-10", "plan")).toEqual(
+      expect.objectContaining({
+        revisionId: updated.revisionId,
+      }),
+    );
+    expect(service.listEvents("issue-10")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "document.saved",
+          metadata: {
+            document_key: "plan",
+            revision_id: "revision-1",
+            previous_revision_id: null,
+            run_id: "run-plan-1",
+          },
+        }),
+        expect.objectContaining({
+          action: "document.saved",
+          metadata: {
+            document_key: "plan",
+            revision_id: "revision-2",
+            previous_revision_id: "revision-1",
+            run_id: "run-plan-2",
+          },
+        }),
+      ]),
+    );
+  });
+
+  it("rejects stale document revisions", () => {
+    const service = new InMemoryIssueService();
+    service.createIssue({
+      id: "issue-11",
+      title: "Reject stale plan revisions",
+      description: "Prevent document overwrite races.",
+      createdAt: "2026-04-02T10:00:00Z",
+      initialStatus: "todo",
+    });
+
+    service.upsertDocument({
+      issueId: "issue-11",
+      key: "plan",
+      title: "Plan",
+      format: "markdown",
+      body: "# Plan\n\nv1",
+      authorId: "agent-1",
+      at: "2026-04-02T10:01:00Z",
+      baseRevisionId: null,
+    });
+
+    expect(() =>
+      service.upsertDocument({
+        issueId: "issue-11",
+        key: "plan",
+        title: "Plan",
+        format: "markdown",
+        body: "# Plan\n\nstale",
+        authorId: "agent-2",
+        at: "2026-04-02T10:02:00Z",
+        baseRevisionId: null,
+      }),
+    ).toThrowError("document plan expected base revision null but found revision-1");
+  });
 });

@@ -27,6 +27,7 @@ import {
   type ExecutionWorkspaceRoutingResult,
 } from "../control-plane/workspace-routing.js";
 import { StaticSkillLoader } from "../skills/loader.js";
+import { createClaudeProviderModule } from "./claude-provider.js";
 import { createOpenAICompatibleProviderModule } from "./openai-compatible-provider.js";
 import { runExecutableRuntime } from "./executable-runtime.js";
 import { startRuntimeFixtureProviderServer } from "./runtime-fixture-provider-server.js";
@@ -664,6 +665,15 @@ function createRuntimeFixtureProviderModule(
     | (RuntimeFixtureProviderTargetFixture & { baseUrl: string })
     | RuntimeFixtureProviderTargetExternal,
 ): ProviderApiModule {
+  if (config.providerKind === ProviderKind.Claude) {
+    return createClaudeProviderModule({
+      providerId: config.providerId,
+      modelId: config.modelId,
+      baseUrl: config.baseUrl,
+      apiKey: config.mode === "external" ? config.apiKey : undefined,
+    });
+  }
+
   return createOpenAICompatibleProviderModule({
     providerId: config.providerId,
     providerKind: config.providerKind,
@@ -785,23 +795,44 @@ export function parseRuntimeFixtureProviderTarget(
     );
   }
 
+  const providerKind = coerceProviderKind(
+    readRuntimeFixtureOption(args, "--provider-kind") ??
+      env.RUNTIME_FIXTURE_PROVIDER_KIND ??
+      ProviderKind.OpenAI,
+  );
+
   return {
     mode,
     providerId:
       readRuntimeFixtureOption(args, "--provider-id") ??
       env.RUNTIME_FIXTURE_PROVIDER_ID ??
-      "openai-runtime",
-    providerKind: coerceProviderKind(
-      readRuntimeFixtureOption(args, "--provider-kind") ??
-        env.RUNTIME_FIXTURE_PROVIDER_KIND ??
-        ProviderKind.OpenAI,
-    ),
+      defaultRuntimeFixtureProviderId(providerKind),
+    providerKind,
     modelId,
     baseUrl,
     apiKey:
       readRuntimeFixtureOption(args, "--provider-api-key") ??
       env.RUNTIME_FIXTURE_PROVIDER_API_KEY,
   };
+}
+
+function defaultRuntimeFixtureProviderId(providerKind: ProviderKind): string {
+  switch (providerKind) {
+    case ProviderKind.OpenAI:
+      return "openai-runtime";
+    case ProviderKind.Claude:
+      return "claude-runtime";
+    case ProviderKind.OpenCode:
+      return "opencode-runtime";
+    case ProviderKind.Copilot:
+      return "copilot-runtime";
+    case ProviderKind.Cursor:
+      return "cursor-runtime";
+    case ProviderKind.LocalOpenAICompatible:
+      return "local-openai-compatible-runtime";
+    case ProviderKind.Other:
+      return "external-runtime";
+  }
 }
 
 export function coerceProviderMode(
@@ -824,7 +855,7 @@ export function coerceProviderKind(value: string | undefined): ProviderKind {
   }
 
   throw new Error(
-    "provider kind must be one of: openai, claude, opencode, cursor, local_openai_compatible, other",
+    "provider kind must be one of: openai, claude, opencode, copilot, cursor, local_openai_compatible, other",
   );
 }
 

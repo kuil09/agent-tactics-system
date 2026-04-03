@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildOperatorSummary,
@@ -19,6 +19,11 @@ import { HeartbeatOutcome, ProviderKind, VerificationStatus } from "../../src/co
 import { startRuntimeFixtureProviderServer } from "../../src/runtime/runtime-fixture-provider-server.js";
 
 describe("runtime fixture cli", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   it("writes shared success artifacts", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "runtime-cli-success-"));
 
@@ -411,6 +416,51 @@ describe("runtime fixture cli", () => {
     expect(coerceProviderKind("claude")).toBe(ProviderKind.Claude);
   });
 
+  it("derives a provider-specific default identifier for claude", () => {
+    expect(
+      parseRuntimeFixtureCliOptions(
+        [
+          "--provider-mode=external",
+          "--provider-kind=claude",
+          "--provider-base-url=https://claude.test",
+          "--provider-model=claude-sonnet-4-5",
+        ],
+        {},
+      ),
+    ).toMatchObject({
+      providerTarget: {
+        mode: "external",
+        providerId: "claude-runtime",
+        providerKind: ProviderKind.Claude,
+        modelId: "claude-sonnet-4-5",
+        baseUrl: "https://claude.test",
+      },
+    });
+  });
+
+  it("derives a provider-specific default identifier for copilot", () => {
+    expect(
+      parseRuntimeFixtureCliOptions(
+        [
+          "--provider-mode=external",
+          "--provider-kind=copilot",
+          "--provider-base-url=https://copilot.test",
+          "--provider-model=gpt-4.1",
+        ],
+        {},
+      ),
+    ).toMatchObject({
+      providerTarget: {
+        mode: "external",
+        providerId: "copilot-runtime",
+        providerKind: ProviderKind.Copilot,
+        modelId: "gpt-4.1",
+        baseUrl: "https://copilot.test",
+      },
+    });
+    expect(coerceProviderKind("copilot")).toBe(ProviderKind.Copilot);
+  });
+
   it("rejects unknown scenarios", () => {
     expect(() => parseScenario(["--scenario=unknown"])).toThrow(
       "scenario must be one of: success, failure",
@@ -425,7 +475,7 @@ describe("runtime fixture cli", () => {
       "provider mode must be one of: fixture, external",
     );
     expect(() => coerceProviderKind("bad")).toThrow(
-      "provider kind must be one of: openai, claude, opencode, cursor, local_openai_compatible, other",
+      "provider kind must be one of: openai, claude, opencode, copilot, cursor, local_openai_compatible, other",
     );
     expect(() =>
       parseRuntimeFixtureCliOptions(["--provider-mode=external"], {}),
@@ -448,6 +498,81 @@ describe("runtime fixture cli", () => {
     });
 
     expect(result.artifactDir).toContain(`${process.cwd()}/artifacts/runtime-fixtures/success`);
+  });
+
+  it("runs the fixture through the claude provider path", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "runtime-cli-claude-"));
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [{ id: "claude-sonnet-4-5" }],
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+            },
+          },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            content: [
+              {
+                type: "text",
+                text: "Connect heartbeat records to the shared runtime entrypoint :: wire runtime",
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+            },
+          },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await runRuntimeFixtureCli({
+        scenario: "success",
+        rootDir,
+        providerTarget: {
+          mode: "external",
+          providerId: "claude-runtime",
+          providerKind: ProviderKind.Claude,
+          modelId: "claude-sonnet-4-5",
+          baseUrl: "https://claude.test",
+          apiKey: "claude-secret",
+        },
+      });
+
+      const summary = JSON.parse(await readFile(result.summaryPath, "utf8")) as {
+        provider_target: {
+          provider_kind: string;
+        };
+        provider_handshake: {
+          provider_kind: string;
+          summary: string;
+        };
+      };
+
+      expect(result.outcome).toBe("patched");
+      expect(summary.provider_target.provider_kind).toBe(ProviderKind.Claude);
+      expect(summary.provider_handshake).toMatchObject({
+        provider_kind: ProviderKind.Claude,
+        summary: "claude handshake established for claude-sonnet-4-5",
+      });
+      await expect(readFile(result.runtimeLogPath, "utf8")).resolves.toBe(
+        "Connect heartbeat records to the shared runtime entrypoint :: wire runtime",
+      );
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
   });
 
   it("fails fast when workspace routing is blocked", async () => {

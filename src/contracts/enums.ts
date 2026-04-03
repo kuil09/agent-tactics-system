@@ -16,6 +16,7 @@ export enum ProviderKind {
   OpenAI = "openai",
   Claude = "claude",
   OpenCode = "opencode",
+  Copilot = "copilot",
   Cursor = "cursor",
   LocalOpenAICompatible = "local_openai_compatible",
   Other = "other",

@@ -250,6 +250,83 @@ describe("openai-compatible runtime provider", () => {
     });
   });
 
+  it("reuses the openai-compatible path for copilot providers", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "gpt-4.1" }), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "copilot runtime execution",
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+            },
+          },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = await connectProviderApiAdapter({
+      module: createOpenAICompatibleProviderModule({
+        providerId: "copilot-runtime",
+        providerKind: ProviderKind.Copilot,
+        modelId: "gpt-4.1",
+        baseUrl: "https://copilot.test",
+        apiKey: "copilot-secret",
+      }),
+      context: {
+        scenario: "success",
+      },
+    });
+    const repo = new InMemoryRepoAdapter();
+
+    await executeTaskEnvelope({
+      envelope: {
+        objective: "Connect heartbeat records to the shared runtime entrypoint",
+        task_level: TaskLevel.L1,
+        inputs: [],
+        allowed_tools: ["node"],
+        write_scope: ["artifacts"],
+        must_not: [],
+        done_when: ["runtime log exists"],
+        stop_conditions: [],
+        output_schema_ref: "schemas/verification-record.schema.json",
+        verification_required: false,
+        rollback_hint: "remove runtime log",
+      },
+      provider,
+      repo,
+      skill_loader: new StaticSkillLoader([]),
+    });
+
+    expect(provider.handshake).toMatchObject({
+      provider_id: "copilot-runtime",
+      provider_kind: ProviderKind.Copilot,
+      model_id: "gpt-4.1",
+    });
+    expect(await repo.read("artifacts/runtime.log")).toBe("copilot runtime execution");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://copilot.test/v1/models/gpt-4.1");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "https://copilot.test/v1/chat/completions",
+    );
+  });
+
   it("fails when the provider omits completion text", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
