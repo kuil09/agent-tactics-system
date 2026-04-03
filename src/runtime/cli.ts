@@ -21,6 +21,11 @@ import {
   type ProviderApiModule,
 } from "../adapters/provider-api/index.js";
 import { FileSystemRepoAdapter } from "../adapters/repo/index.js";
+import {
+  routeExecutionWorkspace,
+  type ExecutionWorkspaceCandidate,
+  type ExecutionWorkspaceRoutingResult,
+} from "../control-plane/workspace-routing.js";
 import { StaticSkillLoader } from "../skills/loader.js";
 import { createOpenAICompatibleProviderModule } from "./openai-compatible-provider.js";
 import { runExecutableRuntime } from "./executable-runtime.js";
@@ -66,8 +71,41 @@ export interface RuntimeFixtureCliResult {
   providerHandshakePath: string;
 }
 
+export interface RuntimeFixtureWorkspaceRoutingSummary {
+  status: ExecutionWorkspaceRoutingResult["status"];
+  available_workspaces: Array<{
+    workspace_id: string;
+    root_path: string;
+    repo_url: string;
+  }>;
+  binding:
+    | {
+        issue_id: string;
+        run_id: string;
+        workspace_id: string;
+        workspace_root: string;
+        repo_url: string;
+        project_workspace_id: string | null;
+        bound_at: string;
+        binding_source: string;
+        candidate_workspace_ids: string[];
+        preference_snapshot: {
+          execution_workspace_id: string | null;
+          repo_url: string | null;
+          allow_project_workspace_fallback: boolean;
+        };
+      }
+    | null;
+  excluded_workspaces: Array<{
+    workspace_id: string;
+    reason: string;
+  }>;
+}
+
 export interface RuntimeFixtureOperatorSummary {
-  operational_flow: "single_workspace_runtime_fixture";
+  operational_flow:
+    | "single_workspace_runtime_fixture"
+    | "workspace_routed_runtime_fixture";
   scenario: RuntimeFixtureScenario;
   final_status: "pending_approval_and_verification" | "failed_and_requeued";
   decision: string;
@@ -79,6 +117,7 @@ export interface RuntimeFixtureOperatorSummary {
     runtime_log_path: string;
     governance_path: string;
     provider_handshake_path: string;
+    workspace_binding_path?: string;
   };
   checks: string[];
 }
@@ -93,17 +132,43 @@ export async function runRuntimeFixtureCli(
   const rootDir = resolve(options.rootDir ?? process.cwd());
   const artifactDir = join(rootDir, "artifacts", "runtime-fixtures", options.scenario);
   const workspaceDir = join(artifactDir, "workspace");
+  const fallbackWorkspaceDir = join(artifactDir, "workspace-fallback");
   const summaryPath = join(artifactDir, "run-result.json");
   const runtimeLogPath = join(workspaceDir, "artifacts", "runtime.log");
   const providerHandshakePath = `${summaryPath}#provider_handshake`;
+  const workspaceBindingPath = `${summaryPath}#workspace_routing.binding`;
 
   await rm(artifactDir, { recursive: true, force: true });
   await mkdir(workspaceDir, { recursive: true });
-
-  const repo = new FileSystemRepoAdapter(workspaceDir);
-  await seedWorkspace(repo, options.scenario);
+  await mkdir(fallbackWorkspaceDir, { recursive: true });
 
   const fixture = createRuntimeFixture(options.scenario);
+  const workspaceCandidates = createRuntimeFixtureWorkspaceCandidates({
+    workspaceDir,
+    fallbackWorkspaceDir,
+  });
+  const workspaceRouting = routeExecutionWorkspace({
+    issue: {
+      issueId: fixture.heartbeat.issue_id,
+      projectWorkspaceId: "workspace-primary",
+      executionWorkspacePreference: {
+        repoUrl: "https://github.com/kuil09/agent-tactics-system",
+      },
+    },
+    runId: fixture.heartbeat.record_id,
+    at: fixture.heartbeat.started_at,
+    candidates: workspaceCandidates,
+  });
+
+  if (workspaceRouting.status !== "selected") {
+    throw new Error(
+      `runtime fixture workspace routing blocked: ${workspaceRouting.code}: ${workspaceRouting.reason}`,
+    );
+  }
+
+  const repo = new FileSystemRepoAdapter(workspaceRouting.binding.workspaceRoot);
+  await seedWorkspace(repo, options.scenario);
+
   const providerTarget =
     options.providerTarget ?? createDefaultRuntimeFixtureProviderTarget();
   const providerServer =
@@ -123,7 +188,7 @@ export async function runRuntimeFixtureCli(
       module: createRuntimeFixtureProviderModule(providerConfig),
       context: {
         scenario: options.scenario,
-        workspace_root: workspaceDir,
+        workspace_root: workspaceRouting.binding.workspaceRoot,
         artifact_dir: artifactDir,
       },
     });
@@ -145,6 +210,7 @@ export async function runRuntimeFixtureCli(
       summaryPath,
       runtimeLogPath,
       providerHandshakePath,
+      workspaceBindingPath,
       handoff: result.verification_handoff,
     });
     await writeFile(
@@ -157,6 +223,10 @@ export async function runRuntimeFixtureCli(
           artifact_dir: artifactDir,
           workspace_dir: workspaceDir,
           runtime_log_path: runtimeLogPath,
+          workspace_routing: buildWorkspaceRoutingSummary(
+            workspaceRouting,
+            workspaceCandidates,
+          ),
           provider_target: summarizeProviderTarget(providerConfig),
           provider_handshake: provider.handshake,
           heartbeat: result.heartbeat,
@@ -365,21 +435,22 @@ export function buildOperatorSummary(input: {
   summaryPath: string;
   runtimeLogPath: string;
   providerHandshakePath: string;
+  workspaceBindingPath: string;
   handoff: Awaited<ReturnType<typeof runExecutableRuntime>>["verification_handoff"];
 }): RuntimeFixtureOperatorSummary {
   return {
-    operational_flow: "single_workspace_runtime_fixture",
+    operational_flow: "workspace_routed_runtime_fixture",
     scenario: input.scenario,
     final_status:
       input.scenario === "success" ? "pending_approval_and_verification" : "failed_and_requeued",
     decision:
       input.scenario === "success"
-        ? "Runtime execution finished, but promotion remains closed until a human approval artifact and independent verification are both present."
+        ? "Runtime execution finished on a routed workspace, but promotion remains closed until a human approval artifact and independent verification are both present."
         : "Runtime execution failed. Rollback and requeue were recorded for the next attempt.",
     next_action:
       input.scenario === "success"
-        ? "Open run-result.json, confirm approval_workflow and input_defense, then collect the approval decision artifact and run the listed validation commands."
-        : "Open run-result.json, confirm recovery.steps, restored_paths, and residual_risk_paths, then inspect the requeued inputs before retrying.",
+        ? "Open run-result.json, confirm workspace_routing.binding, approval_workflow, and input_defense, then collect the approval decision artifact and run the listed validation commands."
+        : "Open run-result.json, confirm workspace_routing.binding, recovery.steps, restored_paths, and residual_risk_paths, then inspect the requeued inputs before retrying.",
     key_paths: {
       artifact_dir: input.artifactDir,
       workspace_dir: input.workspaceDir,
@@ -387,10 +458,12 @@ export function buildOperatorSummary(input: {
       runtime_log_path: input.runtimeLogPath,
       governance_path: `${input.summaryPath}#verification_handoff.governance`,
       provider_handshake_path: input.providerHandshakePath,
+      workspace_binding_path: input.workspaceBindingPath,
     },
     checks:
       input.scenario === "success"
         ? [
+            "workspace_routing.binding.workspace_id must identify the routed execution workspace",
             "provider_handshake.protocol_version must be provider-module-v1",
             "heartbeat.outcome must be patched",
             "verification_evidence.promotion_gate must be waiting_for_human_approval_and_independent_verifier",
@@ -398,6 +471,7 @@ export function buildOperatorSummary(input: {
             "runtime_log_path must exist",
           ]
         : [
+            "workspace_routing.binding.workspace_id must identify the routed execution workspace",
             "provider_handshake.protocol_version must be provider-module-v1",
             "heartbeat.outcome must be blocked",
             "verification_evidence.promotion_gate must be rollback_and_requeue_recorded",
@@ -438,7 +512,7 @@ function createRuntimeFixture(
   const heartbeat: HeartbeatRecord = {
     record_id: `hb-cli-${scenario}`,
     agent_id: "runtime-cli",
-    issue_id: `runtime-cli-${scenario}`,
+    issue_id: createRuntimeFixtureIssueId(scenario),
     turn_number: scenario === "success" ? 1 : 2,
     inputs_summary:
       scenario === "success"
@@ -526,6 +600,63 @@ function createRuntimeFixture(
     requiredSkillIds: ["runtime-writer"],
     verificationRecords,
   };
+}
+
+function buildWorkspaceRoutingSummary(
+  routing: Extract<ExecutionWorkspaceRoutingResult, { status: "selected" }>,
+  candidates: ExecutionWorkspaceCandidate[],
+): RuntimeFixtureWorkspaceRoutingSummary {
+  return {
+    status: routing.status,
+    available_workspaces: candidates.map((candidate) => ({
+      workspace_id: candidate.workspaceId,
+      root_path: candidate.rootPath,
+      repo_url: candidate.repoUrl,
+    })),
+    binding: {
+      issue_id: routing.binding.issueId,
+      run_id: routing.binding.runId,
+      workspace_id: routing.binding.workspaceId,
+      workspace_root: routing.binding.workspaceRoot,
+      repo_url: routing.binding.repoUrl,
+      project_workspace_id: routing.binding.projectWorkspaceId,
+      bound_at: routing.binding.boundAt,
+      binding_source: routing.binding.bindingSource,
+      candidate_workspace_ids: routing.binding.candidateWorkspaceIds,
+      preference_snapshot: {
+        execution_workspace_id: routing.binding.preferenceSnapshot.executionWorkspaceId,
+        repo_url: routing.binding.preferenceSnapshot.repoUrl,
+        allow_project_workspace_fallback:
+          routing.binding.preferenceSnapshot.allowProjectWorkspaceFallback,
+      },
+    },
+    excluded_workspaces: routing.excluded.map((workspace) => ({
+      workspace_id: workspace.workspaceId,
+      reason: workspace.reason,
+    })),
+  };
+}
+
+function createRuntimeFixtureWorkspaceCandidates(input: {
+  workspaceDir: string;
+  fallbackWorkspaceDir: string;
+}): ExecutionWorkspaceCandidate[] {
+  return [
+    {
+      workspaceId: "workspace-primary",
+      rootPath: input.workspaceDir,
+      repoUrl: "https://github.com/kuil09/agent-tactics-system",
+    },
+    {
+      workspaceId: "workspace-fallback",
+      rootPath: input.fallbackWorkspaceDir,
+      repoUrl: "https://github.com/kuil09/operator-playbooks",
+    },
+  ];
+}
+
+function createRuntimeFixtureIssueId(scenario: RuntimeFixtureScenario): string {
+  return `runtime-cli-${scenario}`;
 }
 
 function createRuntimeFixtureProviderModule(

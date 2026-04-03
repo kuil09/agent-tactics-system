@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   buildOperatorSummary,
@@ -47,7 +47,17 @@ describe("runtime fixture cli", () => {
             runtime_log_path: string;
             governance_path: string;
             provider_handshake_path: string;
+            workspace_binding_path: string;
           };
+        };
+        workspace_routing: {
+          status: string;
+          binding: {
+            workspace_id: string;
+            workspace_root: string;
+            binding_source: string;
+          };
+          excluded_workspaces: Array<{ workspace_id: string; reason: string }>;
         };
         verification_handoff: {
           contract_version: string;
@@ -73,6 +83,20 @@ describe("runtime fixture cli", () => {
       expect(summary.provider_handshake).toMatchObject({
         protocol_version: "provider-module-v1",
         metadata: { scenario: "success" },
+      });
+      expect(summary.workspace_routing).toMatchObject({
+        status: "selected",
+        binding: {
+          workspace_id: "workspace-primary",
+          workspace_root: result.workspaceDir,
+          binding_source: "repo_preference_match",
+        },
+        excluded_workspaces: [
+          {
+            workspace_id: "workspace-fallback",
+            reason: "repo url does not match the issue workspace preference",
+          },
+        ],
       });
       expect(summary.verification_handoff.contract_version).toBe("m5");
       expect(summary.verification_handoff.recovery.attempted).toBe(false);
@@ -124,6 +148,7 @@ describe("runtime fixture cli", () => {
           runtime_log_path: result.runtimeLogPath,
           governance_path: `${result.summaryPath}#verification_handoff.governance`,
           provider_handshake_path: result.providerHandshakePath,
+          workspace_binding_path: `${result.summaryPath}#workspace_routing.binding`,
         },
       });
     } finally {
@@ -175,6 +200,12 @@ describe("runtime fixture cli", () => {
           final_status: string;
           checks: string[];
         };
+        workspace_routing: {
+          binding: {
+            workspace_id: string;
+            workspace_root: string;
+          };
+        };
         verification_handoff: {
           approval_workflow: {
             status: string;
@@ -217,6 +248,10 @@ describe("runtime fixture cli", () => {
       expect(summary.provider_handshake).toMatchObject({
         protocol_version: "provider-module-v1",
         metadata: { scenario: "failure" },
+      });
+      expect(summary.workspace_routing.binding).toMatchObject({
+        workspace_id: "workspace-primary",
+        workspace_root: result.workspaceDir,
       });
       expect(summary.verification_handoff.recovery).toMatchObject({
         attempted: true,
@@ -306,6 +341,9 @@ describe("runtime fixture cli", () => {
         "blocked_by_recovery",
       );
       expect(summary.operator_summary.final_status).toBe("failed_and_requeued");
+      expect(summary.operator_summary.checks).toContain(
+        "workspace_routing.binding.workspace_id must identify the routed execution workspace",
+      );
       expect(summary.operator_summary.checks).toContain(
         "provider_handshake.protocol_version must be provider-module-v1",
       );
@@ -410,6 +448,47 @@ describe("runtime fixture cli", () => {
     });
 
     expect(result.artifactDir).toContain(`${process.cwd()}/artifacts/runtime-fixtures/success`);
+  });
+
+  it("fails fast when workspace routing is blocked", async () => {
+    vi.resetModules();
+    vi.doMock("../../src/control-plane/workspace-routing.js", async () => {
+      const actual = await vi.importActual<
+        typeof import("../../src/control-plane/workspace-routing.js")
+      >("../../src/control-plane/workspace-routing.js");
+
+      return {
+        ...actual,
+        routeExecutionWorkspace: () => ({
+          status: "blocked" as const,
+          code: "workspace_selection_ambiguous" as const,
+          issueId: "runtime-cli-success",
+          runId: "hb-cli-success",
+          reason: "mocked routing block",
+          candidateWorkspaceIds: ["workspace-primary"],
+          requestedWorkspaceId: null,
+          requestedRepoUrl: null,
+          recovery: {
+            action: "set_execution_workspace_id" as const,
+            summary: "set executionWorkspaceId before retrying",
+            targetWorkspaceId: null,
+          },
+        }),
+      };
+    });
+
+    const { runRuntimeFixtureCli: runBlockedFixtureCli } = await import("../../src/runtime/cli.js");
+
+    await expect(
+      runBlockedFixtureCli({
+        scenario: "success",
+      }),
+    ).rejects.toThrow(
+      "runtime fixture workspace routing blocked: workspace_selection_ambiguous: mocked routing block",
+    );
+
+    vi.doUnmock("../../src/control-plane/workspace-routing.js");
+    vi.resetModules();
   });
 
   it("summarizes non-required verification evidence and preserves unknown artifacts", () => {
@@ -547,6 +626,7 @@ describe("runtime fixture cli", () => {
       summaryPath: "/tmp/run-result.json",
       runtimeLogPath: "/tmp/workspace/artifacts/runtime.log",
       providerHandshakePath: "/tmp/run-result.json#provider_handshake",
+      workspaceBindingPath: "/tmp/run-result.json#workspace_routing.binding",
       handoff,
     });
 
@@ -566,12 +646,13 @@ describe("runtime fixture cli", () => {
       recovery_outcome: "not_needed",
     });
     expect(operatorSummary).toMatchObject({
-      operational_flow: "single_workspace_runtime_fixture",
+      operational_flow: "workspace_routed_runtime_fixture",
       final_status: "pending_approval_and_verification",
       key_paths: {
         summary_path: "/tmp/run-result.json",
         governance_path: "/tmp/run-result.json#verification_handoff.governance",
         provider_handshake_path: "/tmp/run-result.json#provider_handshake",
+        workspace_binding_path: "/tmp/run-result.json#workspace_routing.binding",
       },
     });
   });

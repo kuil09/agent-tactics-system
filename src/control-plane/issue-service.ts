@@ -127,6 +127,8 @@ export class IssueReleaseError extends Error {
   }
 }
 
+const TERMINAL_ISSUE_STATUSES: IssueStatus[] = ["done", "cancelled"];
+
 const ALLOWED_STATUS_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   backlog: ["todo", "cancelled"],
   todo: ["in_progress", "blocked", "cancelled"],
@@ -221,6 +223,33 @@ export class InMemoryIssueService {
         },
       });
       throw error;
+    }
+
+    const checkoutToRelease =
+      issue.checkout &&
+      issue.checkout.agentId === input.actorId &&
+      TERMINAL_ISSUE_STATUSES.includes(input.nextStatus)
+        ? { ...issue.checkout }
+        : null;
+
+    if (checkoutToRelease) {
+      issue.checkout = null;
+      this.recordEvent(issue.id, {
+        actorId: input.actorId,
+        action: "release.granted",
+        outcome: "succeeded",
+        detail: `checkout released by ${input.actorId}`,
+        createdAt: input.at,
+        metadata: {
+          run_id: checkoutToRelease.runId,
+          next_status: input.nextStatus,
+        },
+      });
+      this.appendSystemComment(
+        issue,
+        input.at,
+        `Checkout released by \`${input.actorId}\`; issue moved to \`${input.nextStatus}\`.`,
+      );
     }
 
     issue.status = input.nextStatus;

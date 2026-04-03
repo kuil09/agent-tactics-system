@@ -538,6 +538,68 @@ describe("InMemoryIssueService", () => {
     ]);
   });
 
+  it("auto-releases checkout ownership when the owner moves work into done", () => {
+    const service = new InMemoryIssueService();
+    service.createIssue({
+      id: "issue-7d",
+      title: "Clear checkout on terminal completion",
+      description: "Done work must not retain an active checkout.",
+      createdAt: "2026-04-02T10:00:00Z",
+      initialStatus: "todo",
+    });
+
+    service.checkoutIssue({
+      issueId: "issue-7d",
+      agentId: "agent-1",
+      runId: "run-1",
+      expectedStatuses: ["todo"],
+      at: "2026-04-02T10:01:00Z",
+    });
+
+    const transitioned = service.transitionIssue({
+      issueId: "issue-7d",
+      actorId: "agent-1",
+      nextStatus: "done",
+      at: "2026-04-02T10:02:00Z",
+      reason: "verification passed",
+    });
+
+    expect(transitioned.status).toBe("done");
+    expect(transitioned.checkout).toBeNull();
+    expect(service.listComments("issue-7d")).toEqual([
+      expect.objectContaining({
+        body: "Checkout granted to `agent-1` for run `run-1`.",
+      }),
+      expect.objectContaining({
+        body: "Checkout released by `agent-1`; issue moved to `done`.",
+      }),
+      expect.objectContaining({
+        body: "Status changed to `done`: verification passed",
+      }),
+    ]);
+    expect(service.listEvents("issue-7d")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "release.granted",
+          outcome: "succeeded",
+          metadata: {
+            run_id: "run-1",
+            next_status: "done",
+          },
+        }),
+        expect.objectContaining({
+          action: "status.changed",
+          outcome: "succeeded",
+          metadata: {
+            previous_status: "in_progress",
+            next_status: "done",
+            reason: "verification passed",
+          },
+        }),
+      ]),
+    );
+  });
+
   it("allows same-status transitions and same-status release for the checkout owner", () => {
     const service = new InMemoryIssueService();
     service.createIssue({

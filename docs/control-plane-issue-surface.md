@@ -13,6 +13,8 @@ credible outside the reference runtime:
   `in_review`, `done`, `blocked`, and `cancelled`
 - checkout acquisition with expected-status checks and lock-conflict rejection
 - checkout release back to the issue queue or an explicit next status
+- automatic checkout release when the checkout owner moves work into terminal
+  `done` or `cancelled` states
 - comment creation and incremental comment reads for issue threads
 
 ## Product Boundary

@@ -18,6 +18,7 @@ tests around those boundaries.
 - Turn queue, canonical state store, and promotion flow in `src/orchestrator`
 - Programmatic and CLI-accessible executable runtime entrypoints in `src/runtime`
 - Minimal control-plane issue coordination service in `src/control-plane`
+- Operator-facing dashboard plus issue and approval workbench renderers in `src/control-plane`
 - Independent verification planning and replay helpers in `src/verifier`
 - Vitest coverage for schemas, policies, orchestrator behavior, providers, and
   verification flows, including executable runtime wiring, fixture replay, and
